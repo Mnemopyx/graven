@@ -19177,6 +19177,7 @@ const button_handlers = [_]ButtonHandler{
     handler("sketch.palette.select", struct {
         fn f(_: i32) void {
             sk_tool = .none;
+            sk_stroke_tool = false;
             sk_nclicks = 0;
         }
     }.f),
@@ -19318,6 +19319,11 @@ const button_handlers = [_]ButtonHandler{
     handler("sketch.ink", struct {
         fn f(_: i32) void {
             skInk();
+        }
+    }.f),
+    handler("sketch.stroke-tool", struct {
+        fn f(_: i32) void {
+            skToggleStrokeTool();
         }
     }.f),
     handler("ink.new-stroke-style", struct {
@@ -30449,6 +30455,7 @@ fn skToolAllowed(t: SkTool) bool {
 fn skChooseTool(t: SkTool) void {
     if (!skToolAllowed(t)) return;
     sk_tool = t;
+    sk_stroke_tool = false;
     sk_nclicks = 0;
     if (skGeoOf(t)) |g| sk_geo_last[@intFromEnum(g)] = t;
 }
@@ -30941,6 +30948,41 @@ fn skInk() void {
     const key = mergeKey(.{ "ink", r.sketch, state.model.revision });
     _ = actM(key, .inkPiecesDraft, .{ r.sketch, fs, !all }) catch {};
     tell(if (all) "Ink taken off. " else "Inked in the current stroke style. ");
+}
+
+/// The stroke tool (K; the owner, 2026-11-28: inking by tool modes):
+/// while on, the piece of a curve under the pointer is shown, and
+/// Ctrl+click strokes it in the current stroke style or takes that stroke
+/// off. Plain clicks select as ever; a geometry tool, S or Escape leaves it.
+var sk_stroke_tool = false;
+
+fn skToggleStrokeTool() void {
+    sk_stroke_tool = !(sk_stroke_tool and sk_tool == .none);
+    if (sk_stroke_tool) {
+        sk_tool = .none;
+        sk_nclicks = 0;
+        tell("Stroke tool: Ctrl+click a piece of a line or arc to stroke it in the current stroke style, again to take it off. ");
+    } else tell("Stroke tool off. ");
+}
+
+/// Ctrl+click with the stroke tool: the piece under the pointer stroked
+/// in the current stroke style, or that stroke taken off.
+fn skStrokeAt(s: *const skl.Sketch) void {
+    const r = sketch_edit orelse return;
+    const h = skCurveHit() orelse {
+        tell("Stroke: no line or arc there. ");
+        return;
+    };
+    const f = skl.pieces.pieceAt(s, dvui.currentWindow().arena(), h.g, h.at) catch |err| {
+        tell(if (err == error.Unbounded) "That part of the line has no end: it needs a crossing or a point on it each side. " else "Not a piece of a curve. ");
+        return;
+    };
+    const on = !state.model.pieceInked(r.sketch, f);
+    _ = act(.inkPiecesDraft, .{ r.sketch, &[_]skl.pieces.Found{f}, on }) catch {
+        tell("That piece could not be stroked. ");
+        return;
+    };
+    tell(if (on) "Stroked in the current stroke style. " else "Stroke taken off. ");
 }
 
 /// Ink in sketch-mode Properties: inking the selection, and the stroke
@@ -32895,6 +32937,8 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
                     sk_nclicks = 0;
                 } else if (sk_tool != .none) {
                     sk_tool = .none;
+                } else if (sk_stroke_tool) {
+                    sk_stroke_tool = false;
                 } else sk_sel.clearRetainingCapacity();
             },
             kact("sketch.finish") => {
@@ -32915,6 +32959,7 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             kact("sketch.constraint.lock") => skConstrain(.fixed, area),
             kact("sketch.tool.next") => skCycleTool(),
             kact("sketch.ink") => skInk(),
+            kact("sketch.stroke-tool") => skToggleStrokeTool(),
             kact("sketch.fill") => skFill(),
             kact("sketch.caption") => skAddCaption(),
             kact("sketch.connect") => skConnect(),
@@ -33035,7 +33080,9 @@ fn sketchEvent(e: *dvui.Event, box: *dvui.BoxWidget, area: dvui.Rect.Physical) v
             } else if (sk_box) |b| {
                 sk_box = null;
                 if (skDist(b.start, b.at) * state.view.ppm < 4) {
-                    if (sk_press_shift) {
+                    if (sk_stroke_tool and sk_tool == .none and sk_press_ctrl and !sk_press_shift) {
+                        skStrokeAt(it.sketch);
+                    } else if (sk_press_shift) {
                         skPieceSelect(it.sketch, b.start);
                     } else if (skTarget()) |t| skClickSelect(t.pick, sk_press_ctrl) else if (!sk_press_ctrl) sk_sel.clearRetainingCapacity();
                 } else skBoxSelect(it.sketch, b.start, b.at, sk_press_ctrl);
@@ -33486,7 +33533,7 @@ fn skDrawPieces(area: dvui.Rect.Physical, it: SkPlace) void {
         },
         else => {},
     };
-    if (!sk_shift or sk_tool != .none or sk_box != null) return;
+    if (!(sk_shift or sk_stroke_tool) or sk_tool != .none or sk_box != null) return;
     if (skHoverPiece(s)) |f| {
         skDrawFound(area, it, f, colors.select.opacity(0.3), 9 * px);
         skDrawFound(area, it, f, colors.select.opacity(0.8), 2 * px);
@@ -34076,6 +34123,15 @@ fn sketchInkKeys() void {
         var wd: dvui.WidgetData = undefined;
         keyIcon(@src(), "ink-selection", dvui.entypo.brush, 0, .{ .data_out = &wd });
         elementTip(@src(), wd.borderRectScale().r, "ink.ink-selection", false, 0);
+    }
+    {
+        // The stroke tool: a mode, tinted while on.
+        const saved_group = pushGroup("ink");
+        defer popGroup(saved_group);
+        const on = sk_stroke_tool and sk_tool == .none;
+        var wd: dvui.WidgetData = undefined;
+        keyIcon(@src(), "stroke-tool", dvui.entypo.pencil, 0, .{ .data_out = &wd, .color_fill = if (on) .{ .color = dvui.themeGet().focus.opacity(0.35) } else null });
+        elementTip(@src(), wd.borderRectScale().r, "ink.stroke-tool", on, 0);
     }
     {
         const saved_group = pushGroup("fill");

@@ -64,7 +64,7 @@ pub const modes = [_]M{
     // A panel's grid instances being placed.
     .{ .name = "panel-edit", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{"panel-edit"} },
     // A sketch being drawn and constrained, and its summary.
-    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.fill", "sketch.caption", "sketch.connect", "sketch.end", "sketch.show", "sketch.palette" } },
+    .{ .name = "sketch", .kind = .major, .lifetime = .until_left, .parent = "global", .allows = &.{ "sketch.tab", "sketch.cancel", "sketch.finish", "sketch.delete", "sketch.constraint", "sketch.tool", "sketch.ink", "sketch.stroke-tool", "sketch.fill", "sketch.caption", "sketch.connect", "sketch.end", "sketch.show", "sketch.palette" } },
     .{ .name = "sketch.summary", .kind = .sub, .parent = "sketch", .allows = &.{"sketch.summary"} },
     // Text being typed somewhere, the canvas or a field (whatever asked
     // for text input last frame): the digraph key, and the two characters
@@ -282,6 +282,7 @@ pub const action_defs = [_]A{
     .{ .name = "sketch.constraint.lock", .repeat = true },
     .{ .name = "sketch.tool.next", .repeat = true },
     .{ .name = "sketch.ink", .repeat = true },
+    .{ .name = "sketch.stroke-tool" },
     .{ .name = "sketch.fill", .repeat = true },
     .{ .name = "sketch.caption" },
     .{ .name = "sketch.connect" },
@@ -681,6 +682,7 @@ pub const binds = [_]B{
     .{ .mode = "sketch", .chord = "x", .action = "sketch.end.discard" },
     .{ .mode = "sketch", .chord = "w", .action = "sketch.show.ink-only" },
     .{ .mode = "sketch", .chord = "i", .action = "sketch.ink" },
+    .{ .mode = "sketch", .chord = "k", .action = "sketch.stroke-tool" },
     .{ .mode = "sketch", .chord = "f", .action = "sketch.fill" },
     .{ .mode = "sketch", .chord = "n", .action = "sketch.caption" },
     .{ .mode = "sketch", .chord = "j", .action = "sketch.connect" },

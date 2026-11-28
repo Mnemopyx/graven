@@ -810,6 +810,7 @@ pub const all = [_]Element{
     .{ .id = "fill.means-a-cutout", .kind = .toggle, .label = "Means a cutout" },
     .{ .id = "fill.new-fill-style", .kind = .button, .label = "New fill style" },
     .{ .id = "ink.ink-selection", .kind = .button, .action = "sketch.ink", .label = "Ink selection", .tip = "Ink: stroke the selected lines and arcs, or pieces of them (Shift+click one between its crossings), in the current stroke style, or take their ink off" },
+    .{ .id = "ink.stroke-tool", .kind = .button, .action = "sketch.stroke-tool", .label = "Stroke tool", .tip = "Stroke tool: Ctrl+click a piece of a line or arc (between its crossings) to stroke it in the current stroke style, or take that stroke off; K again leaves it" },
     .{ .id = "ink.stroke-style", .kind = .choice, .label = "Stroke style" },
     .{ .id = "ink.pen", .kind = .value, .label = "Pen" },
     .{ .id = "ink.width", .kind = .field, .label = "Width, mm" },
