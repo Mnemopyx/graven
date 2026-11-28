@@ -31,6 +31,7 @@
 
 const std = @import("std");
 const geometry = @import("geometry.zig");
+const units = @import("units.zig");
 
 const Allocator = std.mem.Allocator;
 const Geometry = geometry.Geometry;
@@ -59,6 +60,33 @@ pub const Kind = enum {
     tessellation,
     connection,
     caption,
+    /// A library object (the owner, 2026-11-28): made by one tool or one
+    /// library call, its type named by `Group.type_name` (a string, so an
+    /// older Graven that does not know the type still loads it), its size
+    /// and shape read and set through its parameters (`Group.params`).
+    library,
+};
+
+/// A library object's parameter (the owner, 2026-11-28): not a
+/// constraint, but a measurement. Read, it measures the object's geometry
+/// as it is now; applied, it holds that measurement at a value for one
+/// solve, then lets go, so the object stays free to be dragged. Its
+/// contract (equal radii, tangency, perpendicular sides …) is its own
+/// constraints'.
+pub const Param = struct {
+    /// Unique within its object, never reused: what outside references
+    /// hold once they have found it by name.
+    id: u32,
+    /// Short, for reference: `w`, `h`, `r`.
+    name: []const u8,
+    /// What it is: a length or an angle.
+    dimension: units.Dimension = .length,
+    /// The unit it is shown in.
+    unit: units.Unit = .mm,
+    /// What it measures: a dimension over the object's own points and
+    /// edges (a distance from a point to a side, a radius, an angle), its
+    /// value unused.
+    measure: Constraint,
 };
 
 /// A construction property: sides, columns, rings, sweep (radians) …
@@ -85,6 +113,12 @@ pub const Group = struct {
     /// Ungrouped: kept so IDs hold, holding nothing.
     removed: bool = false,
     props: std.ArrayList(Prop) = .empty,
+    /// A library object's type (`round-rect`): empty for other kinds.
+    type_name: []const u8 = "",
+    /// A library object's parameters, in the order shown.
+    params: std.ArrayList(Param) = .empty,
+    /// The ID the next parameter added takes.
+    next_param: u32 = 0,
     frame: Frame = .{},
     /// Its own members (not those of its child groups). Rebuilt from the
     /// primitives, never saved.
@@ -99,9 +133,21 @@ pub const Group = struct {
         for (g.props.items) |p| if (std.mem.eql(u8, p.name, name)) return p.value;
         return null;
     }
+
+    /// A parameter by its ID.
+    pub fn param(g: *const Group, id: u32) ?*const Param {
+        for (g.params.items) |*p| if (p.id == id) return p;
+        return null;
+    }
+
+    /// A parameter by its name (to be held by its ID after).
+    pub fn paramNamed(g: *const Group, name: []const u8) ?*const Param {
+        for (g.params.items) |*p| if (std.mem.eql(u8, p.name, name)) return p;
+        return null;
+    }
 };
 
-pub const Error = Allocator.Error || error{ NoSuchGroup, NotSiblings, Sealed };
+pub const Error = Allocator.Error || error{ NoSuchGroup, NotSiblings, Sealed, NameTaken };
 
 pub const Groups = struct {
     list: std.ArrayList(Group) = .empty,
@@ -114,6 +160,9 @@ pub const Groups = struct {
     fn freeGroup(g: *Group, a: Allocator) void {
         for (g.props.items) |p| a.free(p.name);
         g.props.deinit(a);
+        for (g.params.items) |p| a.free(p.name);
+        g.params.deinit(a);
+        a.free(g.type_name);
         g.geometry.deinit(a);
         g.constraints.deinit(a);
         g.children.deinit(a);
@@ -127,6 +176,13 @@ pub const Groups = struct {
             try c.list.append(a, .{ .parent = g.parent, .kind = g.kind, .sealed = g.sealed, .removed = g.removed, .frame = g.frame });
             const at = &c.list.items[c.list.items.len - 1];
             for (g.props.items) |p| try at.props.append(a, .{ .name = try a.dupe(u8, p.name), .value = p.value });
+            at.type_name = try a.dupe(u8, g.type_name);
+            at.next_param = g.next_param;
+            for (g.params.items) |p| {
+                var q = p;
+                q.name = try a.dupe(u8, p.name);
+                try at.params.append(a, q);
+            }
             try at.geometry.appendSlice(a, g.geometry.items);
             try at.constraints.appendSlice(a, g.constraints.items);
             try at.children.appendSlice(a, g.children.items);
@@ -356,6 +412,25 @@ pub const Groups = struct {
             return;
         };
         try g.props.append(a, .{ .name = try a.dupe(u8, name), .value = value });
+    }
+
+    /// Names library object `id`'s type.
+    pub fn setTypeName(gs: *Groups, a: Allocator, id: GroupId, name: []const u8) Error!void {
+        const g = try gs.get(id);
+        const copy = try a.dupe(u8, name);
+        a.free(g.type_name);
+        g.type_name = copy;
+    }
+
+    /// Adds a parameter to group `id`, measuring `measure` (a dimension
+    /// over its geometry); returns its ID.
+    pub fn addParam(gs: *Groups, a: Allocator, id: GroupId, name: []const u8, dimension: units.Dimension, unit: units.Unit, measure: Constraint) Error!u32 {
+        const g = try gs.get(id);
+        if (g.paramNamed(name) != null) return error.NameTaken;
+        const pid = g.next_param;
+        try g.params.append(a, .{ .id = pid, .name = try a.dupe(u8, name), .dimension = dimension, .unit = unit, .measure = measure });
+        g.next_param += 1;
+        return pid;
     }
 
     /// Geometry `g` was added inside group `id` (a builder's, for one).

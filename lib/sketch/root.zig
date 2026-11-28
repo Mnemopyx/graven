@@ -30,6 +30,9 @@ pub const caption = @import("caption.zig");
 pub const connector = @import("connector.zig");
 /// Polygons and arrays as composite objects (sealed groups).
 pub const composite = @import("composite.zig");
+/// Library objects with parameters (round-rect …): measured, applied,
+/// exploded through one generic interface.
+pub const library = @import("library.zig");
 /// Pieces of curves between their cuts (ends, points on them, crossings),
 /// chosen for ink and fills.
 pub const pieces = @import("pieces.zig");
@@ -943,6 +946,7 @@ test {
     _ = caption;
     _ = connector;
     _ = composite;
+    _ = library;
     _ = pieces;
     _ = tessellation;
 }

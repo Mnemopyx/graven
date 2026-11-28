@@ -2720,6 +2720,10 @@ fn frame() !dvui.App.Result {
         sample_dial = false;
         loadDialSample();
     }
+    if (sample_round_rect) {
+        sample_round_rect = false;
+        loadRoundRectSample();
+    }
     skPruneSelection();
     ghost_pane.fieldsFollowTheme();
     const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
@@ -2785,6 +2789,8 @@ fn frame() !dvui.App.Result {
                 sample_tessellation = true;
             } else if (std.mem.eql(u8, which, "dial")) {
                 sample_dial = true;
+            } else if (std.mem.eql(u8, which, "round-rect")) {
+                sample_round_rect = true;
             } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {} else if (std.mem.eql(u8, which, "typography")) loadTypography() catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
@@ -8464,6 +8470,10 @@ var sample_sketch_space = false;
 var sample_objects = false;
 var sample_tessellation = false;
 var sample_dial = false;
+/// GRAVEN_SAMPLE=round-rect: two round-rects in a new sketch, one about
+/// its centre, one by two corners, its corner radius
+/// applied as 6 mm; the first chosen, so Properties shows its parameters.
+var sample_round_rect = false;
 var sample_texts = false;
 /// GRAVEN_SAMPLE=connections: the sketch panel sample with a second
 /// connection, its end free, a dot at its end.
@@ -19200,6 +19210,15 @@ const button_handlers = [_]ButtonHandler{
             sk_summary = false;
         }
     }.f),
+    handler("object.explode", struct {
+        fn f(_: i32) void {
+            const it = skItem() orelse return;
+            const obj = skSelectedObject(it) orelse return;
+            if (!skl.library.isObject(it.sketch, obj)) return;
+            sk_sel.clearRetainingCapacity();
+            if (skEdit(.{ .explode = obj }) != null) tell("Exploded: its geometry and constraints are ordinary now, as they were. ");
+        }
+    }.f),
     handler("sketch.palette.select", struct {
         fn f(_: i32) void {
             sk_tool = .none;
@@ -20854,8 +20873,10 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
         .connection => "Connection",
         .caption => "Caption",
         .plain => "Group",
+        .library => "Library object",
     };
     propText(asElement("object.kind"), "{s}", .{kind_name}, 9700);
+    if (g.kind == .library) return libraryProperties(it, obj);
     if (g.kind == .tessellation) return tessellationProperties(it, obj);
     if (g.kind == .dial) return dialProperties(it, obj);
     const Field = struct { id: []const u8, label: []const u8, prop: []const u8, min: f64 };
@@ -20914,6 +20935,37 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
     }
 }
 
+/// A library object's properties (the owner, 2026-11-28), through its
+/// generic interface alone, whatever its type: the type's name, then each
+/// parameter as the geometry measures it now, in a unit field (its unit
+/// in a pop-up beside it, kept per object); a value typed is applied, one
+/// step, nothing held after. Then Explode.
+fn libraryProperties(it: SkPlace, obj: skl.GroupId) void {
+    const g = it.sketch.groups.get(obj) catch return;
+    propText(asElement("object.type"), "{s}", .{g.type_name}, 9760);
+    const ar = dvui.currentWindow().arena();
+    for (g.params.items, 0..) |p, k| {
+        const v = skl.library.measure(it.sketch, p.measure) orelse continue;
+        const deg = p.dimension == .angle;
+        const shown = if (deg) v * 180 / std.math.pi else v;
+        const label = std.fmt.allocPrint(ar, "{s}, {s}", .{ p.name, if (deg) "°" else "mm" }) catch continue;
+        listItem("object.parameter", p.name);
+        const id = p.id;
+        if (numberProp(label, shown, if (deg) -360 else 0.001, if (deg) 360 else 1e6, 9761 + k)) |nv| {
+            const want = if (deg) nv * std.math.pi / 180 else nv;
+            if (@abs(want - v) > 1e-12) {
+                if (skEdit(.{ .param_apply = .{ .object = obj, .param = id, .value = want } }) == null) {
+                    tell(std.fmt.bufPrint(&sk_floor_buf, "{s} cannot be {d}: a dimension holds it otherwise, or the shape cannot take it. ", .{ p.name, nv }) catch "That value cannot be applied. ");
+                    sk_note = state.status;
+                    sk_note_until = platform.monotonicNs() + 5 * std.time.ns_per_s;
+                }
+                return;
+            }
+        }
+    }
+    keyButton(@src(), "explode", 0, .{ .id_extra = 9790, .margin = .{ .y = 6 } });
+}
+
 /// The message when a macro's count would go below its bindings (kept, as
 /// the sketch's note outlives the frame).
 var sk_floor_buf: [160]u8 = undefined;
@@ -20963,6 +21015,20 @@ fn loadDialSample() void {
     _ = act(.setDialLabels, .{ r.sketch, gauge, sheet, 1, style, 0.8 * pitch, 2.4 * pitch }) catch {};
     _ = act(.setDialOrientation, .{ r.sketch, gauge, false, 0 }) catch {};
     if (skItem()) |it| skSelectObject(it.sketch, gauge, false, null);
+}
+
+fn loadRoundRectSample() void {
+    newSketchInOwnSpace();
+    followHome();
+    if (sketch_edit == null) return;
+    const lib = skl.library;
+    const a = skEdit(.{ .round_rect = .{ .variant = .centre, .b = lib.roundRectBox(.centre, .{ .x = -30, .y = 0 }, .{ .x = -5, .y = 15 }) } }) orelse return;
+    const b = skEdit(.{ .round_rect = .{ .variant = .corners, .b = .{ .x0 = 10, .y0 = -12, .x1 = 50, .y1 = 18 } } }) orelse return;
+    const it = skItem() orelse return;
+    const oa = skl.composite.objectOf(it.sketch, a) orelse return;
+    const ob = skl.composite.objectOf(it.sketch, b) orelse return;
+    if ((it.sketch.groups.get(ob) catch return).paramNamed("r")) |p| _ = skEdit(.{ .param_apply = .{ .object = ob, .param = p.id, .value = 6 } });
+    if (skItem()) |now| skSelectObject(now.sketch, oa, false, null);
 }
 
 fn loadTessellationSample() void {
@@ -30581,13 +30647,13 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     return p;
 }
 
-const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_grid, rect_array, polygon, tessellate, dial };
+const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_grid, rect_array, polygon, tessellate, dial, round_rect_centre, round_rect_corners };
 
 /// The geometry buttons, in order, and each one's sub-options (its tools),
 /// the first its default. A button remembers the sub-option last used.
-const SkGeo = enum { point, line, polyline, arc, circle, polygon, array, tessellate, dial };
-const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_grid, .rect_array }, &.{.tessellate}, &.{.dial} };
-var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_grid, .tessellate, .dial };
+const SkGeo = enum { point, line, polyline, arc, circle, polygon, array, tessellate, dial, round_rect };
+const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_grid, .rect_array }, &.{.tessellate}, &.{.dial}, &.{ .round_rect_centre, .round_rect_corners } };
+var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_grid, .tessellate, .dial, .round_rect_centre };
 /// The tessellate tool's tile (its sides) and whether it keeps whole
 /// tiles only, for the next tessellation.
 var tess_sides: u32 = 6;
@@ -32014,7 +32080,7 @@ fn skToolClicks(t: SkTool) usize {
     return switch (t) {
         .none => 0,
         .point => 1,
-        .segment, .polyline, .circle, .line, .ray, .rect_array, .polygon => 2,
+        .segment, .polyline, .circle, .line, .ray, .rect_array, .polygon, .round_rect_centre, .round_rect_corners => 2,
         .arc_centre, .arc_3pt, .circle_3pt, .polar_grid, .dial => 3,
         .tessellate => 1,
     };
@@ -32098,6 +32164,23 @@ fn skToolClick(p: geom.Point, given: SkClickGiven) void {
         },
         .rect_array => if (@abs(c[0].x - c[1].x) > 1e-9 and @abs(c[0].y - c[1].y) > 1e-9) {
             _ = skEdit(.{ .array = .{ .polar = false, .at = c[0], .to = c[1], .cols = array_tool.cols, .rows = array_tool.rows } });
+        },
+        // A round-rect, a library object (the owner, 2026-11-28): its
+        // centre (held as a point of it, the object mirrored about it)
+        // then a corner; or two opposite corners. Its corners a fifth of
+        // its shorter side round; its size and corners its parameters.
+        .round_rect_centre, .round_rect_corners => {
+            const variant: skl.library.RoundRectVariant = if (sk_tool == .round_rect_centre) .centre else .corners;
+            const b = skl.library.roundRectBox(variant, c[0], c[1]);
+            if (b.width() > 1e-9 and b.height() > 1e-9) {
+                if (skEdit(.{ .round_rect = .{ .variant = variant, .b = b, .construction = cons } })) |g| if (skItem()) |it| if (skl.composite.objectOf(it.sketch, g)) |o| {
+                    // A click locked onto something, or typed, holds its
+                    // centre there.
+                    if (variant == .centre) skClickConstraints(g + skl.library.RoundRect.centre, .{ .{ .point = .point }, .none, .none });
+                    skSelectObject(it.sketch, o, false, null);
+                    tell("Round-rect made: drag it to resize; its width, height and corner radius are in Properties. ");
+                };
+            } else tell("A round-rect needs a width and a height. ");
         },
         // A regular polygon: its centre, then a corner.
         .polygon => if (skDist(c[0], c[1]) > 1e-9) {
@@ -32884,6 +32967,7 @@ fn skConstraintText(buf: []u8, c: skl.Constraint) []const u8 {
         .tangent => "Tangent",
         .equal => "Equal",
         .symmetric => "Symmetric",
+        .normal => "Normal",
         .equal_distance => "Equal distance",
         .equal_angle => "Equal angles",
     };
@@ -33124,6 +33208,7 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
         // Within the corner of its second angle.
         .equal_angle => |e| skCornerAnchor(s, e.c, e.d),
         .symmetric => |sy| skMid(s.point(sy.p) catch return null, s.point(sy.q) catch return null),
+        .normal => |nm| s.point(nm.to) catch null,
         .equal_distance => |e| switch (e.b) {
             .points, .x, .y => |ps| skMid(s.point(ps[0]) catch return null, s.point(ps[1]) catch return null),
             .to_line => |t| s.point(t.p) catch null,
@@ -33961,6 +34046,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 break :blk if (c.kind == .equal_angle) "≅" else "=";
             },
             .symmetric => "sym",
+            .normal => "\u{E000}",
             .equal_distance => "=",
             .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter, .angle => blk: {
                 // A reference dimension in parentheses, fainter.
@@ -34074,6 +34160,16 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 }
                 dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } });
             } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } }),
+            // A round-rect: the whole outline as it would be placed.
+            .round_rect_centre, .round_rect_corners => {
+                const b = skl.library.roundRectBox(if (sk_tool == .round_rect_centre) .centre else .corners, sk_clicks[0], p);
+                if (b.width() > 1e-9 and b.height() > 1e-9) {
+                    const ar = dvui.currentWindow().arena();
+                    var segs: std.ArrayList(geom.Segment) = .empty;
+                    skl.library.roundRectShape(ar, b, skl.library.startRadius(b), &segs) catch {};
+                    skPreview(area, it, segs.items);
+                }
+            },
             .polygon => if (skDist(sk_clicks[0], p) > 1e-9) {
                 const c0 = sk_clicks[0];
                 const r = skDist(c0, p);
@@ -34272,7 +34368,7 @@ fn sketchPalette() void {
         defer geo.deinit();
         _ = skPaletteKey(@src(), "sketch.palette.select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none);
         _ = skPaletteKey(@src(), "sketch.palette.construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction);
-        const names = [_][]const u8{ "sketch.palette.point", "sketch.palette.line", "sketch.palette.polyline", "sketch.palette.arc", "sketch.palette.circle", "sketch.palette.polygon", "sketch.palette.array", "sketch.palette.tessellate", "sketch.palette.dial" };
+        const names = [_][]const u8{ "sketch.palette.point", "sketch.palette.line", "sketch.palette.polyline", "sketch.palette.arc", "sketch.palette.circle", "sketch.palette.polygon", "sketch.palette.array", "sketch.palette.tessellate", "sketch.palette.dial", "sketch.palette.round-rect" };
         const tvgs = [_][]const u8{
             icons.graven(.geo_point) orelse dvui.entypo.dot_single,
             icons.graven(.geo_segment) orelse dvui.entypo.flow_line,
@@ -34283,6 +34379,7 @@ fn sketchPalette() void {
             dvui.entypo.grid,
             dvui.entypo.network,
             dvui.entypo.gauge,
+            dvui.entypo.progress_empty,
         };
         inline for (names, 0..) |name, gi| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == gi else false;
@@ -34530,6 +34627,14 @@ fn skToolOverlay(g: SkGeo, key: dvui.Rect.Physical) void {
     if (sk_tool == .dial) {
         const steps = [_][]const u8{ "click its centre", "click its rim where it starts", "turn either way, click where it ends (round to the start: all the way)" };
         dvui.label(@src(), "Dial, step {d} of 3: {s}", .{ sk_nclicks + 1, steps[@min(sk_nclicks, 2)] }, .{ .color_text = .{ .color = faint } });
+        return;
+    }
+    if (g == .round_rect) {
+        const steps = if (sk_tool == .round_rect_centre)
+            [_][]const u8{ "click its centre", "click a corner" }
+        else
+            [_][]const u8{ "click a corner", "click the opposite corner" };
+        dvui.label(@src(), "Round-rect, step {d} of 2: {s}", .{ @as(usize, @min(sk_nclicks, 1)) + 1, steps[@min(sk_nclicks, 1)] }, .{ .color_text = .{ .color = faint } });
         return;
     }
     if (sk_tool == .polar_grid) {
@@ -34889,6 +34994,7 @@ fn skConstraintIcon(c: skl.Constraint) icons.GIcon {
         .equal_angle => .con_angle,
         .equal_distance => .con_equal_distance,
         .symmetric => .con_symmetric,
+        .normal => .con_tangent,
     };
 }
 

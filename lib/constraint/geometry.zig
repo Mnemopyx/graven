@@ -323,6 +323,12 @@ pub const Constraint = struct {
         /// Each a span between two points, along x or y or straight, or
         /// from a point to a straight geometry.
         equal_distance: struct { a: Span, b: Span, value: f64 = 0, side: f64 = 1 },
+        /// The join from `from` to `to` at right angles to a straight
+        /// geometry (`line`): an arc's radius to its end, normal to the side
+        /// it joins there, which makes them tangent at that shared end
+        /// without a tangency's double root (the owner's round-rect,
+        /// 2026-11-28).
+        normal: struct { from: PointRef, to: PointRef, line: GeomId },
         /// `p` and `q` mirrored about a straight geometry (`line`), or
         /// about a point (`point`): one of them.
         symmetric: struct { p: PointRef, q: PointRef, line: ?GeomId = null, point: ?PointRef = null },
@@ -508,6 +514,11 @@ pub fn refs(c: Constraint, buf: *[4]Ref) []const Ref {
                 add(buf, &n, .{ .geom = t.line });
             },
         },
+        .normal => |nm| {
+            add(buf, &n, .{ .point = nm.from });
+            add(buf, &n, .{ .point = nm.to });
+            add(buf, &n, .{ .geom = nm.line });
+        },
         .symmetric => |sy| {
             add(buf, &n, .{ .point = sy.p });
             add(buf, &n, .{ .point = sy.q });
@@ -554,6 +565,7 @@ pub fn mapGeoms(c: *Constraint, ctx: anytype, comptime map: fn (@TypeOf(ctx), Ge
         inline .angle, .parallel, .perpendicular, .tangent, .equal => |*an| M.g(&an.a, ctx) and M.g(&an.b, ctx),
         .equal_angle => |*e| M.g(&e.a, ctx) and M.g(&e.b, ctx) and M.g(&e.c, ctx) and M.g(&e.d, ctx),
         .equal_distance => |*e| M.span(&e.a, ctx) and M.span(&e.b, ctx),
+        .normal => |*nm| M.p(&nm.from, ctx) and M.p(&nm.to, ctx) and M.g(&nm.line, ctx),
         .symmetric => |*sy| M.p(&sy.p, ctx) and M.p(&sy.q, ctx) and
             (if (sy.line) |*l| M.g(l, ctx) else true) and
             (if (sy.point) |*q| M.p(q, ctx) else true),
@@ -608,6 +620,10 @@ pub fn pointRefs(c: *Constraint, buf: *[8]*PointRef) []*PointRef {
             P.span(buf, &n, &e.a);
             P.span(buf, &n, &e.b);
         },
+        .normal => |*nm| {
+            P.add(buf, &n, &nm.from);
+            P.add(buf, &n, &nm.to);
+        },
         .symmetric => |*sy| {
             P.add(buf, &n, &sy.p);
             P.add(buf, &n, &sy.q);
@@ -638,6 +654,7 @@ pub fn refersTo(c: Constraint, g: GeomId) bool {
         inline .angle, .parallel, .perpendicular, .tangent, .equal => |an| an.a == g or an.b == g,
         .equal_angle => |e| e.a == g or e.b == g or e.c == g or e.d == g,
         .equal_distance => |e| spanRefers(e.a, g) or spanRefers(e.b, g),
+        .normal => |nm| nm.from.geom == g or nm.to.geom == g or nm.line == g,
         .symmetric => |sy| sy.p.geom == g or sy.q.geom == g or (sy.line != null and sy.line.? == g) or (sy.point != null and sy.point.?.geom == g),
     };
 }
@@ -927,6 +944,7 @@ pub const Local = struct {
                 const dd = try l.direction(e.d);
                 out[0] = da.cross(db).mul(dc.dot(dd)).sub(da.dot(db).mul(dc.cross(dd)));
             },
+            .normal => |nm| out[0] = (try l.ref(nm.to)).sub(try l.ref(nm.from)).dot(try l.direction(nm.line)),
             .symmetric => |sy| {
                 const pp = try l.ref(sy.p);
                 const q = try l.ref(sy.q);

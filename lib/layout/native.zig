@@ -754,3 +754,28 @@ test "an older track's \"major\" is read as its old orientation, and not written
     defer gpa.free(again);
     try testing.expect(std.mem.indexOf(u8, again, "major") == null);
 }
+
+test "a library object reads back with its type, parameters and their IDs" {
+    const gpa = testing.allocator;
+    var m: model.Model = .init(gpa);
+    defer m.deinit();
+    _ = try m.startCanvas(.mm);
+    const si = try m.addSketchSpace("Plate");
+    const lib = model.sketch_.library;
+    const g = try m.editSketch(si, .{ .round_rect = .{ .variant = .centre, .b = .{ .x0 = -20, .y0 = -10, .x1 = 20, .y1 = 10 } } });
+    const sk = &m.sketches.items[si].sketch;
+    const obj = sk.geometry.items[g].group;
+    const w = (try lib.object(sk, obj)).paramNamed("w").?.id;
+    _ = try m.editSketch(si, .{ .param_apply = .{ .object = obj, .param = w, .value = 55 } });
+    const bytes = try encode(gpa, &m);
+    defer gpa.free(bytes);
+    var back = try decode(gpa, bytes);
+    defer back.deinit();
+    const sk2 = &back.sketches.items[si].sketch;
+    const o2 = try lib.object(sk2, obj);
+    try testing.expectEqualStrings(lib.round_rect, o2.type_name);
+    try testing.expectEqual(@as(usize, 3), o2.params.items.len);
+    try testing.expectEqual(w, o2.paramNamed("w").?.id);
+    try testing.expectApproxEqAbs(55, try lib.value(sk2, obj, w), 1e-6);
+    try testing.expect(o2.sealed);
+}

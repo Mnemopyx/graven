@@ -1539,6 +1539,17 @@ pub const SketchEdit = union(enum) {
     /// A regular polygon (see `sketch_.polygon`) of `sides`, centred at
     /// `c`, a corner at `corner`.
     polygon: struct { c: geom.Point, corner: geom.Point, sides: u32, construction: bool = false },
+    /// A round-rect, a library object (`sketch_.library.addRoundRect`):
+    /// in box `b`, about its centre (mirrored about it) or not, corner
+    /// radius `r` (0: a fifth of its shorter side).
+    round_rect: struct { variant: sketch_.library.RoundRectVariant, b: geom.Box, r: f64 = 0, construction: bool = false },
+    /// A library object's parameter applied (`sketch_.library.apply`): its
+    /// geometry changed to measure `value` (mm, or radians) for one solve,
+    /// nothing held after.
+    param_apply: struct { object: sketch_.GroupId, param: u32, value: f64 },
+    /// A library object exploded (`sketch_.library.explode`): the object
+    /// and its parameters gone, its geometry and constraints ordinary.
+    explode: sketch_.GroupId,
     /// A composite object's construction property set (sides, columns,
     /// rings, rows): the object made again where it is
     /// (`sketch_.composite.setProp`).
@@ -2354,7 +2365,7 @@ pub const Model = struct {
     /// Bumped by every action, so callers can tell when to re-solve.
     revision: u64 = 0,
 
-    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse, ProcessInUse, MaterialInUse, NotOnACurve, Sealed } || sketch_.Error;
+    pub const Error = Allocator.Error || error{ NoRoom, DuplicateDesignator, NoSuchPrototype, NoSuchTile, NoSuchTrack, NoSuchLayer, DuplicateTrack, PrototypeInUse, NoSuchRow, NoSuchItem, NoSuchStyle, BadSize, OffSheet, NotCompliant, ViewCycle, StyleLoop, BadValue, NoSuchObject, BadConstraint, BadJoin, NotFullyConstrained, NotEnclosed, SketchInUse, ProcessInUse, MaterialInUse, NotOnACurve, Sealed, Conflict } || sketch_.Error;
 
     pub fn init(gpa: Allocator) Model {
         return .{ .arena = .init(gpa) };
@@ -6512,6 +6523,12 @@ pub const Model = struct {
                 for (m.panels.items) |*pn| for (pn.grids.items) |*g| m.gridCounts(g, sid, e.object, obj);
                 for (m.spaces.items) |*sp| for (sp.grids.items) |*g| m.gridCounts(g, sid, e.object, obj);
             },
+            .round_rect => |e| {
+                const obj = sketch_.library.addRoundRect(sk, al, e.variant, e.b, e.r, e.construction) catch |err| return libraryError(err);
+                out = (sk.groups.get(obj) catch return error.BadSize).geometry.items[0];
+            },
+            .param_apply => |e| sketch_.library.apply(sk, al, gpa, e.object, e.param, e.value) catch |err| return libraryError(err),
+            .explode => |id| sketch_.library.explode(sk, al, id) catch |err| return libraryError(err),
             .object_place => |e| sketch_.composite.place(sk, al, e.object, e.to) catch |err| return compositeError(err),
             .remove_object => |id| sketch_.composite.removeObject(sk, al, id) catch |err| return compositeError(err),
             .construction => |e| try sk.setConstruction(e.g, e.on),
@@ -11096,10 +11113,18 @@ fn sealedEdit(sk: *const sketch_.Sketch, edit: SketchEdit) Model.Error!void {
     if (refused) return error.Sealed;
 }
 
+fn libraryError(err: sketch_.library.Error) Model.Error {
+    return switch (err) {
+        error.NoSuchGroup, error.NotAnObject => error.NoSuchItem,
+        error.NotSiblings, error.Sealed, error.NameTaken => error.BadValue,
+        else => |e| e,
+    };
+}
+
 fn compositeError(err: sketch_.composite.Error) Model.Error {
     return switch (err) {
         error.NoSuchGroup, error.NotAnObject => error.NoSuchItem,
-        error.NotSiblings, error.Sealed, error.TooFewBindPoints => error.BadValue,
+        error.NotSiblings, error.Sealed, error.TooFewBindPoints, error.NameTaken => error.BadValue,
         else => |e| e,
     };
 }
