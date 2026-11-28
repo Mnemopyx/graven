@@ -28,7 +28,7 @@ const Constraint = root.Constraint;
 const group = root.group;
 const GroupId = group.GroupId;
 
-pub const Error = root.Error || group.Error || error{NotAnObject};
+pub const Error = root.Error || group.Error || error{ NotAnObject, TooFewBindPoints };
 
 /// Old geometry to new, after an object is made again (`to` null: gone).
 pub const Remap = struct {
@@ -538,27 +538,88 @@ pub fn setProp(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f
     }
 }
 
-/// A macro object's count set (the owner, 2026-11-27): nothing is made
-/// again and no unknown moves; only how many sections are drawn and which
-/// bind points there are change. Constraints on bind points it no longer
-/// has are kept, out of the solve, and counted in `remap.dropped` (each is
-/// a problem with its fixes: see `abandoned`); they hold again should the
-/// count come back.
+/// A macro object's count set (the owner, 2026-11-27/28): nothing is
+/// made again and no unknown moves; only how many sections are drawn and
+/// which bind points there are change. Bindings (constraints on its bind
+/// points) move with the count: each bound index to the same fraction of
+/// the run, in order, kept apart, the ends staying ends. A count may drop
+/// only while there are bind points enough for every binding along that
+/// run; below that, `error.TooFewBindPoints`, and bindings are removed by
+/// hand first (`boundIndices` says how many there are).
 fn setCount(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64, remap: *Remap) Error!void {
+    _ = remap;
     const m = macroGeometry(s, id) orelse return error.NotAnObject;
     const n: u32 = @intFromFloat(@max(0, @round(value)));
     if (n < 1 or n > 10_000) return error.WrongKind;
+    const cols = std.mem.eql(u8, name, "columns");
+    if (!cols and !std.mem.eql(u8, name, "rings")) return error.WrongKind;
     const pg = &s.geometry.items[m].kind.polar_grid;
-    if (std.mem.eql(u8, name, "columns")) {
-        pg.cols = n;
-    } else if (std.mem.eql(u8, name, "rings")) {
-        pg.rings = n;
-    } else return error.WrongKind;
-    try s.groups.setProp(a, id, name, @floatFromInt(n));
-    const st = s.store();
-    for (s.constraints.items) |c| {
-        if (root.refersTo(c, m) and st.abandoned(c)) remap.dropped += 1;
+    const old = if (cols) pg.cols else pg.rings;
+    if (n != old) {
+        // The distinct bound indices along this run, in order.
+        const bound = try boundIndices(s, a, m, cols);
+        defer a.free(bound);
+        if (bound.len > n + 1) return error.TooFewBindPoints;
+        const to = try a.alloc(u32, bound.len);
+        defer a.free(to);
+        for (bound, to) |b, *t| {
+            t.* = if (b == old) n else @intFromFloat(@round(@as(f64, @floatFromInt(b)) * @as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(old))));
+        }
+        // Kept in order and apart, within 0..n.
+        for (to, 0..) |*t, k| {
+            if (k > 0) t.* = @max(t.*, to[k - 1] + 1);
+        }
+        var k = to.len;
+        while (k > 0) {
+            k -= 1;
+            const room: u32 = n - @as(u32, @intCast(to.len - 1 - k));
+            to[k] = @min(to[k], room);
+            if (k + 1 < to.len) to[k] = @min(to[k], to[k + 1] - 1);
+        }
+        for (s.constraints.items) |*c| {
+            var buf: [8]*root.PointRef = undefined;
+            for (root.geometry.pointRefs(c, &buf)) |r| {
+                if (r.geom != m or r.role != .node) continue;
+                const idx = if (cols) &r.i else &r.j;
+                if (idx.* == root.geometry.last) continue;
+                for (bound, to) |b, t| if (b == idx.*) {
+                    idx.* = t;
+                    break;
+                };
+            }
+        }
     }
+    if (cols) pg.cols = n else pg.rings = n;
+    try s.groups.setProp(a, id, name, @floatFromInt(n));
+}
+
+/// The distinct indices along a macro's run (`cols`: its borders, else its
+/// rings) that constraints are bound to, `last` read as the count, in
+/// order. Owned by `a`.
+pub fn boundIndices(s: *const Sketch, a: Allocator, m: GeomId, cols: bool) Allocator.Error![]u32 {
+    const pg = s.geometry.items[m].kind.polar_grid;
+    const n = if (cols) pg.cols else pg.rings;
+    var out: std.ArrayList(u32) = .empty;
+    for (s.constraints.items) |c_in| {
+        var c = c_in;
+        var buf: [8]*root.PointRef = undefined;
+        for (root.geometry.pointRefs(&c, &buf)) |r| {
+            if (r.geom != m or r.role != .node) continue;
+            const k = root.geometry.PolarGrid.index(if (cols) r.i else r.j, n) orelse continue;
+            if (std.mem.indexOfScalar(u32, out.items, k) == null) try out.append(a, k);
+        }
+    }
+    std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
+    return out.toOwnedSlice(a);
+}
+
+/// How few of property `name` (`columns` or `rings`) object `id` may have:
+/// enough bind points for every binding along that run (at least 1).
+pub fn countFloor(s: *const Sketch, a: Allocator, id: GroupId, name: []const u8) Allocator.Error!u32 {
+    const m = macroGeometry(s, id) orelse return 1;
+    const b = try boundIndices(s, a, m, std.mem.eql(u8, name, "columns"));
+    defer a.free(b);
+    return @max(1, @as(u32, @intCast(b.len)) -| 1);
 }
 
 fn mapOne(r: *Remap, g: GeomId) ?GeomId {
@@ -683,7 +744,7 @@ test "an object placed: a rectangular array to a new box, a polar one turned and
     try std.testing.expectApproxEqAbs(std.math.pi / 3.0, pp.first, 1e-9);
 }
 
-test "a polar grid macro: counts are properties, bind points follow them, lost ones flagged" {
+test "a polar grid macro: counts are properties, bindings move with them, never below them" {
     const al = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(al);
     defer arena.deinit();
@@ -694,45 +755,45 @@ test "a polar grid macro: counts are properties, bind points follow them, lost o
     const id = try addPolarGrid(&s, a, .{ .x = 0, .y = 0 }, 12, 3, std.math.pi / 2.0, 0, 4, 3);
     const m = macroGeometry(&s, id).?;
     const vars_before = s.vars.items.len;
-    // The outer corner held to a point outside it.
+    // The last border's first ring held to a point; the centre to the
+    // origin; border 3, ring 1 at 9 from the origin.
     const p = try s.addPoint(a, .{ .x = 30, .y = 1 }, false);
     _ = try s.addConstraint(a, .{ .kind = .{ .fixed = .{ .p = .{ .geom = p }, .at = .{ .x = 20, .y = 0 } } } });
     _ = try s.addConstraint(a, .{ .kind = .{ .coincident = .{ .{ .geom = m, .role = .node, .i = root.geometry.last, .j = 0 }, .{ .geom = p } } } });
-    // Its centre to the origin; the inner radius's corner held at x 3 on it.
     _ = try s.addConstraint(a, .{ .kind = .{ .coincident = .{ .{ .geom = m, .role = .centre }, .{ .geom = root.origin } } } });
-    // A constraint on the third border's middle bind point.
-    _ = try s.addConstraint(a, .{ .kind = .{ .distance = .{ .a = .{ .geom = m, .role = .node, .i = 3, .j = 1 }, .b = .{ .geom = root.origin }, .value = 9 } } });
-    const res = try s.solve(a);
-    try testing.expect(res.solved);
+    const mid = try s.addConstraint(a, .{ .kind = .{ .distance = .{ .a = .{ .geom = m, .role = .node, .i = 3, .j = 1 }, .b = .{ .geom = root.origin }, .value = 9 } } });
+    try testing.expect((try s.solve(a)).solved);
     const corner = try s.point(.{ .geom = m, .role = .node, .i = root.geometry.last, .j = 0 });
     try testing.expectApproxEqAbs(20, corner.x, 1e-6);
     try testing.expectApproxEqAbs(0, corner.y, 1e-6);
 
-    // Fewer columns: nothing made again, no unknown added; the constraint
-    // on border 3 is abandoned (kept, flagged), the corner's still holds.
+    // Fewer columns: nothing made again, no unknown added; border 3 of 4
+    // moves to border 1 of 2 (the last stays the last, apart from it).
     var remap: Remap = .{};
     try setProp(&s, a, id, "columns", 2, &remap);
-    try testing.expectEqual(vars_before, s.vars.items.len - 2);
-    try testing.expectEqual(@as(usize, 1), remap.dropped);
+    try testing.expectEqual(vars_before + 2, s.vars.items.len);
+    try testing.expectEqual(@as(u32, 1), s.constraints.items[mid].kind.distance.a.i);
+    try testing.expect((try s.solve(a)).solved);
+    // Down to one: two bindings, two borders; still fits.
+    try setProp(&s, a, id, "columns", 1, &remap);
+    try testing.expectEqual(@as(u32, 0), s.constraints.items[mid].kind.distance.a.i);
+    try testing.expectEqual(@as(u32, 1), try countFloor(&s, a, id, "columns"));
+    // Three bindings along the rings (0, 1 and the last): no fewer than 2.
+    _ = try s.addConstraint(a, .{ .kind = .{ .distance = .{ .a = .{ .geom = m, .role = .node, .i = 0, .j = root.geometry.last }, .b = .{ .geom = root.origin }, .value = 12 } } });
+    try testing.expectEqual(@as(u32, 2), try countFloor(&s, a, id, "rings"));
+    try testing.expectError(error.TooFewBindPoints, setProp(&s, a, id, "rings", 1, &remap));
+    try testing.expectEqual(@as(u32, 3), s.geometry.items[m].kind.polar_grid.rings);
+    try setProp(&s, a, id, "rings", 2, &remap);
+    try testing.expectEqual(@as(?f64, 2), (try s.groups.get(id)).prop("rings"));
     var lost: std.ArrayList(root.ConstraintId) = .empty;
     try abandoned(&s, a, &lost);
-    try testing.expectEqual(@as(usize, 1), lost.items.len);
-    try testing.expectEqual(@as(?u32, 3), countNeeded(&s, s.constraints.items[lost.items[0]], "columns"));
-    try testing.expect((try s.solve(a)).solved);
-    const corner2 = try s.point(.{ .geom = m, .role = .node, .i = root.geometry.last, .j = 0 });
-    try testing.expectApproxEqAbs(20, corner2.x, 1e-6);
-    // Back to four: it holds again.
-    try setProp(&s, a, id, "columns", 4, &remap);
-    lost.clearRetainingCapacity();
-    try abandoned(&s, a, &lost);
     try testing.expectEqual(@as(usize, 0), lost.items.len);
-    try testing.expectEqual(@as(?f64, 4), (try s.groups.get(id)).prop("columns"));
-    // Drawn: 4 rings (radius 0 would draw none) and 5 borders.
+    // Drawn: 3 rings and 2 borders.
     var segs: std.ArrayList(geom.Segment) = .empty;
     try s.appendSegments(a, s.geometry.items[m], &segs);
     var lines: usize = 0;
     for (segs.items) |sg| if (sg == .line) {
         lines += 1;
     };
-    try testing.expectEqual(@as(usize, 5), lines);
+    try testing.expectEqual(@as(usize, 2), lines);
 }

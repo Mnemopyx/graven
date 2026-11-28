@@ -20807,8 +20807,22 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
             next_element = f.id;
             if (numberProp(f.label, v, f.min, 256, 9701 + k)) |nv| {
                 const n = @round(nv);
-                const set = n != v and skEdit(.{ .object_prop = .{ .object = obj, .name = f.prop, .value = n } }) != null;
+                // A macro's count goes no lower than its bindings along
+                // that run need (the owner, 2026-11-28): fewer, and some
+                // must be removed by hand first.
+                const floor: f64 = if (skl.composite.isMacro(g.kind)) @floatFromInt(skl.composite.countFloor(it.sketch, dvui.currentWindow().arena(), obj, f.prop) catch 1) else f.min;
+                const too_few = n != v and n < floor;
+                // Told once for the value typed, not every frame it stays.
+                const told = sk_floor_told != null and sk_floor_told.?[0] == k and sk_floor_told.?[1] == n;
+                if (too_few and !told) {
+                    sk_floor_told = .{ k, n };
+                    tell(std.fmt.bufPrint(&sk_floor_buf, "Its bindings need at least {d} {s}: remove bindings first to go lower. ", .{ floor, f.prop }) catch "Too few for its bindings. ");
+                    sk_note = state.status;
+                    sk_note_until = platform.monotonicNs() + 5 * std.time.ns_per_s;
+                }
+                const set = n != v and !too_few and skEdit(.{ .object_prop = .{ .object = obj, .name = f.prop, .value = n } }) != null;
                 // A macro's bind points may have gone (or come back).
+                if (!too_few) sk_floor_told = null;
                 if (set) refreshProblems();
                 if (set and !skl.composite.isMacro(g.kind)) {
                     // Made again: its old pieces are gone, so one of its
@@ -20820,6 +20834,11 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
         }
     }
 }
+
+/// The message when a macro's count would go below its bindings (kept, as
+/// the sketch's note outlives the frame).
+var sk_floor_buf: [160]u8 = undefined;
+var sk_floor_told: ?[2]f64 = null;
 
 fn skSelectedConnection(it: SkPlace) ?u32 {
     for (sk_sel.items) |p| {
@@ -33628,7 +33647,10 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             std.fmt.bufPrint(&sk_status_buf, "{s}: {d} degree{s} of freedom left · Enter for the summary ", .{ it.name, x.dof, if (x.dof == 1) "" else "s" }) catch "";
         if (sk_note.len > 0 and platform.monotonicNs() < sk_note_until) {
             const readout = dvui.currentWindow().arena().dupe(u8, state.status) catch "";
-            tell(std.fmt.bufPrint(&sk_status_buf, "{s}· {s}", .{ sk_note, readout }) catch state.status);
+            // Shown, not logged again: the note went into the log when
+            // it was said, and the readout is redrawn every frame.
+            state.status = std.fmt.bufPrint(&sk_status_buf, "{s}· {s}", .{ sk_note, readout }) catch state.status;
+            logged_status = statusKey(state.status);
         }
     }
     skDimEntry(area);

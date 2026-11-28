@@ -445,6 +445,63 @@ pub fn mapGeoms(c: *Constraint, ctx: anytype, comptime map: fn (@TypeOf(ctx), Ge
     };
 }
 
+/// Every point constraint `c` names, by pointer (at most 8), into `buf`:
+/// for rewriting them in place (a macro's bind points renumbered).
+pub fn pointRefs(c: *Constraint, buf: *[8]*PointRef) []*PointRef {
+    var n: usize = 0;
+    const P = struct {
+        fn add(b: *[8]*PointRef, k: *usize, r: *PointRef) void {
+            if (k.* < b.len) {
+                b[k.*] = r;
+                k.* += 1;
+            }
+        }
+        fn lin(b: *[8]*PointRef, k: *usize, l: *Linear) void {
+            switch (l.*) {
+                .geom => {},
+                .points => |*ps| {
+                    add(b, k, &ps[0]);
+                    add(b, k, &ps[1]);
+                },
+            }
+        }
+        fn span(b: *[8]*PointRef, k: *usize, sp: *Span) void {
+            switch (sp.*) {
+                inline .points, .x, .y => |*ps| {
+                    add(b, k, &ps[0]);
+                    add(b, k, &ps[1]);
+                },
+                .to_line => |*t| add(b, k, &t.p),
+            }
+        }
+    };
+    switch (c.kind) {
+        .coincident => |*ps| {
+            P.add(buf, &n, &ps[0]);
+            P.add(buf, &n, &ps[1]);
+        },
+        .horizontal, .vertical => |*l| P.lin(buf, &n, l),
+        .point_on => |*po| P.add(buf, &n, &po.p),
+        .fixed => |*f| P.add(buf, &n, &f.p),
+        inline .distance, .distance_x, .distance_y => |*d| {
+            P.add(buf, &n, &d.a);
+            P.add(buf, &n, &d.b);
+        },
+        .line_distance => |*d| P.add(buf, &n, &d.p),
+        .radius, .diameter, .angle, .parallel, .perpendicular, .tangent, .equal, .equal_angle => {},
+        .equal_distance => |*e| {
+            P.span(buf, &n, &e.a);
+            P.span(buf, &n, &e.b);
+        },
+        .symmetric => |*sy| {
+            P.add(buf, &n, &sy.p);
+            P.add(buf, &n, &sy.q);
+            if (sy.point) |*q| P.add(buf, &n, q);
+        },
+    }
+    return buf[0..n];
+}
+
 /// Whether constraint `c` refers to geometry `g`.
 pub fn refersTo(c: Constraint, g: GeomId) bool {
     const lin = struct {

@@ -10823,7 +10823,7 @@ fn sealedEdit(sk: *const sketch_.Sketch, edit: SketchEdit) Model.Error!void {
 fn compositeError(err: sketch_.composite.Error) Model.Error {
     return switch (err) {
         error.NoSuchGroup, error.NotAnObject => error.NoSuchItem,
-        error.NotSiblings, error.Sealed => error.BadValue,
+        error.NotSiblings, error.Sealed, error.TooFewBindPoints => error.BadValue,
         else => |e| e,
     };
 }
