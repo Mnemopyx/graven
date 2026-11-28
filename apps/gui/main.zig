@@ -34379,7 +34379,8 @@ fn sketchPalette() void {
             dvui.entypo.grid,
             dvui.entypo.network,
             dvui.entypo.gauge,
-            dvui.entypo.progress_empty,
+            // The variant it places next.
+            (if (sk_geo_last[@intFromEnum(SkGeo.round_rect)] == .round_rect_centre) icons.graven(.roundrect_centre) else icons.graven(.roundrect_corners)) orelse dvui.entypo.progress_empty,
         };
         inline for (names, 0..) |name, gi| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == gi else false;
