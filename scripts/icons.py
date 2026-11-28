@@ -260,7 +260,7 @@ def dot(x, y, r=1.7):
     return circle(x, y, r, "mark")
 
 
-def hot(x, y, r=2.4):
+def hot(x, y, r=2.0):
     """A point the user clicks, in a tool's icon (the click-point rule):
     large, ringed thinly, so its colour carries at the smallest size."""
     return width(circle(x, y, r, "hot"), 0.9)
@@ -285,8 +285,8 @@ def drawn(outline):
     return [("ink", closed(outline))]
 
 
-# The round rectangle tools' frame: a rectangle 20 x 16, corners radius 4.5.
-RR = (2.0, 1.5, 22.0, 17.5, 4.5)
+# The round rectangle tools' frame: a rectangle 20 x 16, corners radius 5.
+RR = (2.0, 1.5, 22.0, 17.5, 5.0)
 
 
 def roundrect_corners():
@@ -298,7 +298,7 @@ def roundrect_corners():
     cx, cy = x1 - r, y0 + r
     return (made(rr) + construction(closed([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]))
             + construction([(cx, y0), (cx, cy), (x1, cy)]) + drawn(rr)
-            + hot(x0, y0) + hot(x1, y1) + hot(cx, cy, 2.0))
+            + hot(x0, y0) + hot(x1, y1) + hot(cx, cy))
 
 
 def roundrect_centre():
@@ -312,7 +312,7 @@ def roundrect_centre():
     return (made(rr) + construction(closed([(x0, y0), (x1, y0), (x1, y1), (x0, y1)]))
             + construction([(mx, y0 - 1.2), (mx, y1 + 1.2)]) + construction([(x0 - 1.2, my), (x1 + 1.2, my)])
             + construction([(cx, y0), (cx, cy), (x0, cy)]) + drawn(rr)
-            + hot(mx, my) + hot(x1, y1) + hot(cx, cy, 2.0))
+            + hot(mx, my) + hot(x1, y1) + hot(cx, cy))
 
 
 ICONS = {
