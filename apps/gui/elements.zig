@@ -812,6 +812,7 @@ pub const all = [_]Element{
     .{ .id = "ink.ink-selection", .kind = .button, .action = "sketch.ink", .label = "Ink selection", .tip = "Ink: stroke the selected lines and arcs, or pieces of them (Shift+click one between its crossings), in the current stroke style, or take their ink off" },
     .{ .id = "ink.stroke-tool", .kind = .button, .action = "sketch.stroke-tool", .label = "Stroke tool", .tip = "Stroke tool: Ctrl+click a piece of a line or arc (between its crossings) to stroke it in the current stroke style, or take that stroke off; K again leaves it" },
     .{ .id = "ink.stroke-style", .kind = .choice, .label = "Stroke style" },
+    .{ .id = "fill.fill-tool", .kind = .button, .action = "sketch.fill-tool", .label = "Fill tool", .tip = "Fill tool: Ctrl+click inside an area (the smallest closed path round that place) to fill it in the current fill style, or take that fill off; B again leaves it" },
     .{ .id = "ink.pen", .kind = .value, .label = "Pen" },
     .{ .id = "ink.width", .kind = .field, .label = "Width, mm" },
     .{ .id = "ink.colour", .kind = .field, .label = "Colour" },
