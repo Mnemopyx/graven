@@ -20834,7 +20834,7 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
                 // A macro's count goes no lower than its bindings along
                 // that run need (the owner, 2026-11-28): fewer, and some
                 // must be removed by hand first.
-                const floor: f64 = if (skl.composite.isMacro(g.kind)) @floatFromInt(skl.composite.countFloor(it.sketch, dvui.currentWindow().arena(), obj, f.prop) catch 1) else f.min;
+                const floor: f64 = if (skl.composite.isMacro(g.kind)) @floatFromInt((if (sketch_edit) |r| state.model.objectCountFloor(dvui.currentWindow().arena(), r.sketch, obj, f.prop) else skl.composite.countFloor(it.sketch, dvui.currentWindow().arena(), obj, f.prop, &.{})) catch 1) else f.min;
                 const too_few = n != v and n < floor;
                 // Told once for the value typed, not every frame it stays.
                 const told = sk_floor_told != null and sk_floor_told.?[0] == k and sk_floor_told.?[1] == n;
@@ -20848,6 +20848,22 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
                 // A macro's bind points may have gone (or come back).
                 if (!too_few) sk_floor_told = null;
                 if (set) refreshProblems();
+                // A macro's chosen pieces and bind points name indices that
+                // have just moved: they leave the selection.
+                if (set and skl.composite.isMacro(g.kind)) if (skl.composite.macroGeometry(it.sketch, obj)) |m| {
+                    var k2: usize = sk_sel.items.len;
+                    while (k2 > 0) {
+                        k2 -= 1;
+                        const stale = switch (sk_sel.items[k2]) {
+                            .piece => |pf| pf.geom == m,
+                            .point => |pr| pr.geom == m and pr.role == .node,
+                            else => false,
+                        };
+                        if (stale) _ = sk_sel.orderedRemove(k2);
+                    }
+                    // The object stays in Properties.
+                    if (sk_sel.items.len == 0) skSelectObject(it.sketch, obj, false, null);
+                };
                 if (set and !skl.composite.isMacro(g.kind)) {
                     // Made again: its old pieces are gone, so one of its
                     // new ones is chosen, keeping it in Properties.
@@ -31452,9 +31468,14 @@ fn skLineOf(s: *const skl.Sketch, g: skl.Geometry) ?struct { p: geom.Point, d: g
 }
 
 /// The nearest place on geometry `g` to `q`, if it has one there.
-fn skNearestOn(s: *const skl.Sketch, g: skl.Geometry, q: geom.Point) ?geom.Point {
+fn skNearestOn(s: *const skl.Sketch, g: skl.Geometry, gi: skl.GeomId, q: geom.Point) ?geom.Point {
     switch (g.kind) {
-        .point, .affine, .polar_grid, .tessellation => return null,
+        .point, .affine, .tessellation => return null,
+        // Its nearest ring or border (indexed curves of it).
+        .polar_grid => {
+            const n = (skl.pieces.nearestPart(s, dvui.currentWindow().arena(), gi, q) catch null) orelse return null;
+            return n.at;
+        },
         .segment, .line, .ray => {
             const l = skLineOf(s, g) orelse return null;
             var t = (q.x - l.p.x) * l.d.x + (q.y - l.p.y) * l.d.y;
@@ -31554,7 +31575,7 @@ fn skFindHits(s: *const skl.Sketch, q: geom.Point, radius: f64, hidden: Tags) vo
             pdist[k] = d;
             sk_nhits += 1;
         }
-        if (skNearestOn(s, g, q)) |p| {
+        if (skNearestOn(s, g, @intCast(gi), q)) |p| {
             const d = skDist(p, q);
             if (d > radius or ncurves >= curves.len) continue;
             var k = ncurves;
@@ -33251,7 +33272,9 @@ fn skTogglePick(p: SkPick) void {
 
 /// A chosen piece as a pick: a whole curve as the curve itself.
 fn skFoundPick(f: skl.pieces.Found) SkPick {
-    return if (f.whole()) .{ .curve = f.geom } else .{ .piece = f };
+    // A macro's whole ring or border stays a piece: the geometry is the
+    // whole macro.
+    return if (f.whole() and f.part.isWhole()) .{ .curve = f.geom } else .{ .piece = f };
 }
 
 /// Selects every point and whole curve inside the box.

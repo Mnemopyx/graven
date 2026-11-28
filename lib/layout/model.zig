@@ -6158,11 +6158,33 @@ pub const Model = struct {
     /// while a draft is open, so the accepted drawing stays as it was).
     /// Piece `p` with its geometry and points remapped; null when any is gone.
     fn remapPiece(remap: *const sketch_.composite.Remap, p: figure_.Piece) ?figure_.Piece {
-        var o = p;
+        // A macro's indices first (its count changed), then IDs.
+        var o = remap.piece(p);
         o.geom = remap.get(p.geom) orelse return null;
-        if (p.from) |r| o.from = .{ .geom = remap.get(r.geom) orelse return null, .role = r.role };
-        if (p.to) |r| o.to = .{ .geom = remap.get(r.geom) orelse return null, .role = r.role };
+        if (o.from) |r| o.from.?.geom = remap.get(r.geom) orelse return null;
+        if (o.to) |r| o.to.?.geom = remap.get(r.geom) orelse return null;
         return o;
+    }
+
+    /// The pieces drawings over sketch `index` hold (their inks and
+    /// fills, the pending ones while a draft is open): bindings on its
+    /// geometry, as its constraints are. From `a`.
+    pub fn heldPieces(m: *const Model, al: Allocator, index: usize) Allocator.Error![]figure_.Piece {
+        const it = &m.sketches.items[index];
+        var out: std.ArrayList(figure_.Piece) = .empty;
+        for (m.figures.items) |f| if (f.sketch == it.id) {
+            const marks: figure_.Marks = if (it.accepted != null) (f.pending orelse .{ .inks = f.inks, .fills = f.fills }) else .{ .inks = f.inks, .fills = f.fills };
+            for (marks.inks) |k| try out.append(al, k.piece());
+            for (marks.fills) |fl| try out.appendSlice(al, fl.pieces);
+        };
+        return out.items;
+    }
+
+    /// How few of count `name` object `obj` of sketch `index` may have:
+    /// enough bind points for its constraints and its drawings' pieces.
+    pub fn objectCountFloor(m: *const Model, al: Allocator, index: usize, obj: sketch_.GroupId, name: []const u8) Allocator.Error!u32 {
+        const held = try m.heldPieces(al, index);
+        return sketch_.composite.countFloor(&m.sketches.items[index].sketch, al, obj, name, held);
     }
 
     fn followRemap(m: *Model, index: usize, remap: *const sketch_.composite.Remap) Error!void {
@@ -6171,7 +6193,7 @@ pub const Model = struct {
         for (m.figures.items) |*f| if (f.sketch == it.id) {
             var marks: figure_.Marks = if (drafting) (f.pending orelse .{ .inks = f.inks, .fills = f.fills }) else .{ .inks = f.inks, .fills = f.fills };
             var inks: std.ArrayList(figure_.Ink) = .empty;
-            for (marks.inks) |ink| if (remapPiece(remap, ink.piece())) |p| try inks.append(m.a(), .{ .geom = p.geom, .from = p.from, .to = p.to, .style = ink.style });
+            for (marks.inks) |ink| if (remapPiece(remap, ink.piece())) |p| try inks.append(m.a(), .{ .geom = p.geom, .part = p.part, .from = p.from, .to = p.to, .style = ink.style });
             var fills: std.ArrayList(figure_.Fill) = .empty;
             fill: for (marks.fills) |fl| {
                 const gs = try m.a().alloc(u32, fl.geoms.len);
@@ -6249,7 +6271,7 @@ pub const Model = struct {
             },
             .object_prop => |e| {
                 // The sketch's own allocator: what it makes lives in it.
-                var remap: sketch_.composite.Remap = .{};
+                var remap: sketch_.composite.Remap = .{ .held = try m.heldPieces(m.a(), index) };
                 sketch_.composite.setProp(sk, al, e.object, e.name, e.value, &remap) catch |err| return compositeError(err);
                 try m.followRemap(index, &remap);
                 // Its array grids take its counts.
@@ -8033,7 +8055,7 @@ pub const Model = struct {
         const f = &m.figures.items[fi];
         var inks: std.ArrayList(figure_.Ink) = .empty;
         for (f.inks) |k| if (!k.piece().eql(p)) try inks.append(m.a(), k);
-        if (on) try inks.append(m.a(), .{ .geom = p.geom, .from = p.from, .to = p.to, .style = try m.inkStyle() });
+        if (on) try inks.append(m.a(), .{ .geom = p.geom, .part = p.part, .from = p.from, .to = p.to, .style = try m.inkStyle() });
         f.inks = inks.items;
         try m.syncSketchFigures(item.id);
         m.revision += 1;
@@ -8094,7 +8116,7 @@ pub const Model = struct {
             const n = it.sketch.constraints.items.len;
             const p = (try sketch_.pieces.attach(&it.sketch, m.a(), f, on)) orelse return if (on) error.NoSuchItem else {};
             made = made or it.sketch.constraints.items.len != n;
-            if (p.whole()) try geoms.append(m.a(), p.geom) else try ps.append(m.a(), p);
+            if (p.whole() and p.part.isWhole()) try geoms.append(m.a(), p.geom) else try ps.append(m.a(), p);
         }
         if (made) {
             it.version +%= 1;
@@ -8117,7 +8139,7 @@ pub const Model = struct {
         var ps: std.ArrayList(figure_.Piece) = .empty;
         for (found) |f| {
             const p = (sketch_.pieces.attach(&it.sketch, m.a(), f, false) catch return null) orelse return null;
-            if (p.whole()) geoms.append(m.a(), p.geom) catch return null else ps.append(m.a(), p) catch return null;
+            if (p.whole() and p.part.isWhole()) geoms.append(m.a(), p.geom) catch return null else ps.append(m.a(), p) catch return null;
         }
         const fig = m.figures.items[fi];
         const fills = if (fig.pending) |pd| pd.fills else fig.fills;

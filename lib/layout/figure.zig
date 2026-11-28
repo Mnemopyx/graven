@@ -89,6 +89,8 @@ pub const Piece = @import("graven_sketch").pieces.Piece;
 pub const Ink = struct {
     /// The geometry, in the figure's sketch.
     geom: u32,
+    /// Which of its curves (a macro's ring or border, by index).
+    part: @import("graven_sketch").Part = .{},
     /// The piece of it inked, between these points on it (both null:
     /// the whole of it).
     from: ?@import("graven_sketch").PointRef = null,
@@ -97,7 +99,7 @@ pub const Ink = struct {
     style: @import("model.zig").ObjectId,
 
     pub fn piece(k: Ink) Piece {
-        return .{ .geom = k.geom, .from = k.from, .to = k.to };
+        return .{ .geom = k.geom, .part = k.part, .from = k.from, .to = k.to };
     }
 };
 

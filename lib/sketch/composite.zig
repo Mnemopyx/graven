@@ -27,6 +27,7 @@ const GeomId = root.GeomId;
 const Constraint = root.Constraint;
 const group = root.group;
 const GroupId = group.GroupId;
+const Piece = root.pieces.Piece;
 
 pub const Error = root.Error || group.Error || error{ NotAnObject, TooFewBindPoints };
 
@@ -35,9 +36,56 @@ pub const Remap = struct {
     pairs: std.ArrayList(struct { from: GeomId, to: ?GeomId }) = .empty,
     /// Constraints from outside dropped, their part being gone.
     dropped: usize = 0,
+    /// In: pieces held outside the sketch on its geometry (a drawing's
+    /// inks and fills): bindings like its constraints, so a macro's count
+    /// goes no lower than they need, and they follow it.
+    held: []const Piece = &.{},
+    /// Out: a macro's indices along one run renumbered (its count
+    /// changed): what holds its bind points and curves follows (`node`,
+    /// `part`, `piece`).
+    run: ?Run = null,
+
+    pub const Run = struct { geom: GeomId, cols: bool, from: []const u32, to: []const u32 };
 
     pub fn deinit(r: *Remap, a: Allocator) void {
         r.pairs.deinit(a);
+        if (r.run) |run| {
+            a.free(run.from);
+            a.free(run.to);
+        }
+    }
+
+    fn index(run: Run, k: u32) u32 {
+        if (k == last) return k;
+        for (run.from, run.to) |f, t| if (f == k) return t;
+        return k;
+    }
+
+    /// Point `p` renumbered (a bind point of the macro whose count changed).
+    pub fn node(r: *const Remap, p: root.PointRef) root.PointRef {
+        const run = r.run orelse return p;
+        if (p.geom != run.geom or p.role != .node) return p;
+        var o = p;
+        if (run.cols) o.i = index(run, p.i) else o.j = index(run, p.j);
+        return o;
+    }
+
+    /// Curve `p` of `g` renumbered.
+    pub fn part(r: *const Remap, g: GeomId, p: root.Part) root.Part {
+        const run = r.run orelse return p;
+        if (g != run.geom) return p;
+        var o = p;
+        if ((p.role == .border) == run.cols and p.role != .whole) o.k = index(run, p.k);
+        return o;
+    }
+
+    /// Piece `p`'s curve and ends renumbered.
+    pub fn piece(r: *const Remap, p: Piece) Piece {
+        var o = p;
+        o.part = r.part(p.geom, p.part);
+        if (p.from) |x| o.from = r.node(x);
+        if (p.to) |x| o.to = r.node(x);
+        return o;
     }
 
     pub fn get(r: *const Remap, g: GeomId) ?GeomId {
@@ -606,7 +654,6 @@ pub fn setProp(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f
 /// run; below that, `error.TooFewBindPoints`, and bindings are removed by
 /// hand first (`boundIndices` says how many there are).
 fn setCount(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64, remap: *Remap) Error!void {
-    _ = remap;
     const m = macroGeometry(s, id) orelse return error.NotAnObject;
     const n: u32 = @intFromFloat(@max(0, @round(value)));
     if (n < 1 or n > 10_000) return error.WrongKind;
@@ -616,11 +663,11 @@ fn setCount(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64,
     const old = if (cols) pg.cols else pg.rings;
     if (n != old) {
         // The distinct bound indices along this run, in order.
-        const bound = try boundIndices(s, a, m, cols);
-        defer a.free(bound);
+        const bound = try boundIndices(s, a, m, cols, remap.held);
+        errdefer a.free(bound);
         if (bound.len > n + 1) return error.TooFewBindPoints;
         const to = try a.alloc(u32, bound.len);
-        defer a.free(to);
+        errdefer a.free(to);
         for (bound, to) |b, *t| {
             t.* = if (b == old) n else @intFromFloat(@round(@as(f64, @floatFromInt(b)) * @as(f64, @floatFromInt(n)) / @as(f64, @floatFromInt(old))));
         }
@@ -635,16 +682,17 @@ fn setCount(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64,
             to[k] = @min(to[k], room);
             if (k + 1 < to.len) to[k] = @min(to[k], to[k + 1] - 1);
         }
+        if (remap.run) |old_run| {
+            a.free(old_run.from);
+            a.free(old_run.to);
+        }
+        remap.run = .{ .geom = m, .cols = cols, .from = bound, .to = to };
         for (s.constraints.items) |*c| {
             var buf: [8]*root.PointRef = undefined;
-            for (root.geometry.pointRefs(c, &buf)) |r| {
-                if (r.geom != m or r.role != .node) continue;
-                const idx = if (cols) &r.i else &r.j;
-                if (idx.* == root.geometry.last) continue;
-                for (bound, to) |b, t| if (b == idx.*) {
-                    idx.* = t;
-                    break;
-                };
+            for (root.geometry.pointRefs(c, &buf)) |r| r.* = remap.node(r.*);
+            switch (c.kind) {
+                .point_on => |*po| po.part = remap.part(po.on, po.part),
+                else => {},
             }
         }
     }
@@ -655,18 +703,43 @@ fn setCount(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64,
 /// The distinct indices along a macro's run (`cols`: its borders, else its
 /// rings) that constraints are bound to, `last` read as the count, in
 /// order. Owned by `a`.
-pub fn boundIndices(s: *const Sketch, a: Allocator, m: GeomId, cols: bool) Allocator.Error![]u32 {
+pub fn boundIndices(s: *const Sketch, a: Allocator, m: GeomId, cols: bool, held: []const Piece) Allocator.Error![]u32 {
     const pg = s.geometry.items[m].kind.polar_grid;
     const n = if (cols) pg.cols else pg.rings;
     var out: std.ArrayList(u32) = .empty;
+    const B = struct {
+        fn add(al: Allocator, o: *std.ArrayList(u32), k: ?u32) Allocator.Error!void {
+            const x = k orelse return;
+            if (std.mem.indexOfScalar(u32, o.items, x) == null) try o.append(al, x);
+        }
+    };
+    const P = root.geometry.PolarGrid;
+    const nodeAt = struct {
+        fn f(r: root.PointRef, mm: GeomId, c: bool, nn: u32) ?u32 {
+            if (r.geom != mm or r.role != .node) return null;
+            return P.index(if (c) r.i else r.j, nn);
+        }
+    }.f;
+    // A ring is on the rings' run, a border on the borders'.
+    const partAt = struct {
+        fn f(g: GeomId, p: root.Part, mm: GeomId, c: bool, nn: u32) ?u32 {
+            if (g != mm or p.role == .whole or (p.role == .border) != c) return null;
+            return P.index(p.k, nn);
+        }
+    }.f;
     for (s.constraints.items) |c_in| {
         var c = c_in;
         var buf: [8]*root.PointRef = undefined;
-        for (root.geometry.pointRefs(&c, &buf)) |r| {
-            if (r.geom != m or r.role != .node) continue;
-            const k = root.geometry.PolarGrid.index(if (cols) r.i else r.j, n) orelse continue;
-            if (std.mem.indexOfScalar(u32, out.items, k) == null) try out.append(a, k);
+        for (root.geometry.pointRefs(&c, &buf)) |r| try B.add(a, &out, nodeAt(r.*, m, cols, n));
+        switch (c.kind) {
+            .point_on => |po| try B.add(a, &out, partAt(po.on, po.part, m, cols, n)),
+            else => {},
         }
+    }
+    for (held) |p| {
+        try B.add(a, &out, partAt(p.geom, p.part, m, cols, n));
+        if (p.from) |r| try B.add(a, &out, nodeAt(r, m, cols, n));
+        if (p.to) |r| try B.add(a, &out, nodeAt(r, m, cols, n));
     }
     std.mem.sort(u32, out.items, {}, std.sort.asc(u32));
     return out.toOwnedSlice(a);
@@ -674,9 +747,9 @@ pub fn boundIndices(s: *const Sketch, a: Allocator, m: GeomId, cols: bool) Alloc
 
 /// How few of property `name` (`columns` or `rings`) object `id` may have:
 /// enough bind points for every binding along that run (at least 1).
-pub fn countFloor(s: *const Sketch, a: Allocator, id: GroupId, name: []const u8) Allocator.Error!u32 {
+pub fn countFloor(s: *const Sketch, a: Allocator, id: GroupId, name: []const u8, held: []const Piece) Allocator.Error!u32 {
     const m = macroGeometry(s, id) orelse return 1;
-    const b = try boundIndices(s, a, m, std.mem.eql(u8, name, "columns"));
+    const b = try boundIndices(s, a, m, std.mem.eql(u8, name, "columns"), held);
     defer a.free(b);
     return @max(1, @as(u32, @intCast(b.len)) -| 1);
 }
@@ -836,10 +909,10 @@ test "a polar grid macro: counts are properties, bindings move with them, never 
     // Down to one: two bindings, two borders; still fits.
     try setProp(&s, a, id, "columns", 1, &remap);
     try testing.expectEqual(@as(u32, 0), s.constraints.items[mid].kind.distance.a.i);
-    try testing.expectEqual(@as(u32, 1), try countFloor(&s, a, id, "columns"));
+    try testing.expectEqual(@as(u32, 1), try countFloor(&s, a, id, "columns", &.{}));
     // Three bindings along the rings (0, 1 and the last): no fewer than 2.
     _ = try s.addConstraint(a, .{ .kind = .{ .distance = .{ .a = .{ .geom = m, .role = .node, .i = 0, .j = root.geometry.last }, .b = .{ .geom = root.origin }, .value = 12 } } });
-    try testing.expectEqual(@as(u32, 2), try countFloor(&s, a, id, "rings"));
+    try testing.expectEqual(@as(u32, 2), try countFloor(&s, a, id, "rings", &.{}));
     try testing.expectError(error.TooFewBindPoints, setProp(&s, a, id, "rings", 1, &remap));
     try testing.expectEqual(@as(u32, 3), s.geometry.items[m].kind.polar_grid.rings);
     try setProp(&s, a, id, "rings", 2, &remap);
@@ -855,4 +928,76 @@ test "a polar grid macro: counts are properties, bindings move with them, never 
         lines += 1;
     };
     try testing.expectEqual(@as(usize, 2), lines);
+}
+
+test "a polar grid's rings and borders as curves: pieces, cells, a point held on one, held pieces renumbered" {
+    const al = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(al);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pieces = root.pieces;
+    var s = try Sketch.init(a);
+    // A quarter turn from 0 to 90°, radius 3 to 12, 4 sections round, 3 out.
+    const id = try addPolarGrid(&s, a, .{ .x = 0, .y = 0 }, 3, 12, 0, std.math.pi / 2.0, 4, 3);
+    const m = macroGeometry(&s, id).?;
+    _ = try s.addConstraint(a, .{ .kind = .{ .coincident = .{ .{ .geom = m, .role = .centre }, .{ .geom = root.origin } } } });
+    try testing.expect((try s.solve(a)).solved);
+    // Ring 1 (radius 6) between borders 1 and 2 (22.5° and 45°).
+    const t: f64 = 33 * std.math.pi / 180.0;
+    const f = try pieces.pieceAt(&s, a, m, .{ .x = 6.05 * @cos(t), .y = 6.05 * @sin(t) });
+    try testing.expectEqual(.ring, f.part.role);
+    try testing.expectEqual(@as(u32, 1), f.part.k);
+    try testing.expectEqual(@as(u32, 1), f.from.?.point.i);
+    try testing.expectEqual(@as(u32, 2), f.to.?.point.i);
+    // Its ends are the grid's own bind points: nothing added to hold them.
+    const n = s.geometry.items.len;
+    const p = (try pieces.attach(&s, a, f, true)).?;
+    try testing.expectEqual(n, s.geometry.items.len);
+    var segs: std.ArrayList(geom.Segment) = .empty;
+    try pieces.appendSegments(&s, a, p, &segs);
+    try testing.expect(segs.items.len > 0);
+    try testing.expectApproxEqAbs(6 * @cos(std.math.pi / 8.0), segs.items[0].start().x, 1e-9);
+    // A cell is a closed path of four pieces (two rings, two borders).
+    const cell = (try pieces.loopAround(&s, a, .{ .x = 7.5 * @cos(t), .y = 7.5 * @sin(t) })).?;
+    try testing.expectEqual(4, cell.len);
+    // Made lasting, its pieces close a path (a fill's boundary).
+    var cell_segs: std.ArrayList(geom.Segment) = .empty;
+    for (cell) |cf| try pieces.appendSegments(&s, a, (try pieces.attach(&s, a, cf, true)).?, &cell_segs);
+    const ch = try Sketch.chain(a, cell_segs.items);
+    try testing.expectEqual(1, ch.contours.len);
+    try testing.expectEqual(0, ch.open);
+    // A segment across the last ring: the crossing held on that ring.
+    const seg = try s.addSegment(a, .{ .x = 0, .y = 0 }, .{ .x = 20, .y = 20 }, true);
+    const x = try pieces.pieceAt(&s, a, seg, .{ .x = 15, .y = 15 });
+    try testing.expect(x.from.? == .cross);
+    try testing.expectEqual(.ring, x.from.?.cross.other_part.role);
+    _ = (try pieces.attach(&s, a, x, true)).?;
+    var held = false;
+    for (s.constraints.items) |c| if (c.kind == .point_on and c.kind.point_on.on == m and c.kind.point_on.part.role == .ring) {
+        held = true;
+    };
+    try testing.expect(held);
+    // The grid grows: the point stays on its outer ring.
+    _ = try s.addConstraint(a, .{ .kind = .{ .distance = .{ .a = .{ .geom = m, .role = .node, .i = 0, .j = root.geometry.last }, .b = .{ .geom = root.origin }, .value = 15 } } });
+    try testing.expect((try s.solve(a)).solved);
+    var segs2: std.ArrayList(geom.Segment) = .empty;
+    try pieces.appendSegments(&s, a, .{ .geom = seg, .from = .{ .geom = seg, .role = .start }, .to = .{ .geom = seg, .role = .end } }, &segs2);
+    var on15 = false;
+    for (s.geometry.items, 0..) |g, gi| if (g.kind == .point and gi > 3) {
+        const q = try s.point(.{ .geom = @intCast(gi) });
+        if (@abs(std.math.hypot(q.x, q.y) - 15) < 1e-6) on15 = true;
+    };
+    try testing.expect(on15);
+    // Held outside (an ink): counted as a binding, and renumbered with
+    // the count (borders 1 and 2 of 4 become 1 and 2 of 2).
+    const ink = [_]Piece{p};
+    // With the distance on border 0: three borders bound, two columns at least.
+    try testing.expectEqual(@as(u32, 2), try countFloor(&s, a, id, "columns", &ink));
+    try testing.expectEqual(@as(u32, 1), try countFloor(&s, a, id, "columns", &.{}));
+    var remap: Remap = .{ .held = &ink };
+    try setProp(&s, a, id, "columns", 2, &remap);
+    const moved = remap.piece(p);
+    try testing.expectEqual(@as(u32, 1), moved.from.?.i);
+    try testing.expectEqual(@as(u32, 2), moved.to.?.i);
+    try testing.expectEqual(@as(u32, 1), moved.part.k);
 }

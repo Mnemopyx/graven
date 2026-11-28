@@ -49,6 +49,7 @@ pub const ConstraintId = geometry.ConstraintId;
 pub const Pt = geometry.Pt;
 pub const Geometry = geometry.Geometry;
 pub const PointRef = geometry.PointRef;
+pub const Part = geometry.Part;
 pub const Span = geometry.Span;
 pub const Linear = geometry.Linear;
 pub const Constraint = geometry.Constraint;

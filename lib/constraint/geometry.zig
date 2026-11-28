@@ -93,6 +93,21 @@ pub const PointRef = struct {
 /// A bind point's index meaning the last, whatever the count.
 pub const last: u32 = std.math.maxInt(u32);
 
+/// Which curve of a geometry is meant (the owner, 2026-11-28: indexed
+/// curve references): the geometry itself (`whole`), or one of a macro's
+/// curves by its index, as a bind point is: a polar grid's `k`th ring (an
+/// arc or circle at its `k`th radius, across its sweep) or `k`th border (a
+/// radial line at its `k`th angle, from its first radius to its second);
+/// `last` for the last, which stays the last.
+pub const Part = struct {
+    role: enum { whole, ring, border } = .whole,
+    k: u32 = 0,
+
+    pub fn isWhole(p: Part) bool {
+        return p.role == .whole;
+    }
+};
+
 /// A polar grid, a macro object (the owner, 2026-11-27): held by its
 /// driving geometry alone, a centre `c`, two radii `r` and two angles `t`
 /// (radians), and by its counts, which are properties, not geometry. Its
@@ -152,6 +167,16 @@ pub const PolarGrid = struct {
         return .{ .x = vars[g.c.x] + r * @cos(t), .y = vars[g.c.y] + r * @sin(t) };
     }
 
+    /// Whether it has curve `p` (a ring or border within its counts; a
+    /// ring at radius 0 is no curve, but is kept as an index).
+    pub fn hasPart(g: PolarGrid, p: Part) bool {
+        return switch (p.role) {
+            .whole => false,
+            .ring => index(p.k, g.rings) != null,
+            .border => index(p.k, g.cols) != null,
+        };
+    }
+
     /// Its unknowns.
     pub fn unknowns(g: PolarGrid) [6]VarId {
         return .{ g.c.x, g.c.y, g.r[0], g.r[1], g.t[0], g.t[1] };
@@ -206,7 +231,7 @@ pub const Constraint = struct {
         vertical: Linear,
         /// On a line, segment (or its line), ray (or its line), circle or arc
         /// (or its circle).
-        point_on: struct { p: PointRef, on: GeomId },
+        point_on: struct { p: PointRef, on: GeomId, part: Part = .{} },
         fixed: struct { p: PointRef, at: Point },
         distance: struct { a: PointRef, b: PointRef, value: f64 },
         /// How far apart two points are across (along x), and up (along
@@ -333,6 +358,15 @@ pub const Store = struct {
             },
             .geom => {},
         };
+        // A curve of a macro its counts no longer have.
+        if (c.kind == .point_on and !c.kind.point_on.part.isWhole()) {
+            const po = c.kind.point_on;
+            if (po.on >= s.geometry.len or s.geometry[po.on].removed) return true;
+            switch (s.geometry[po.on].kind) {
+                .polar_grid => |pg| if (!pg.hasPart(po.part)) return true,
+                else => return true,
+            }
+        }
         return false;
     }
 
@@ -616,6 +650,33 @@ pub const Local = struct {
         return l.p(try l.s.pointOf(r));
     }
 
+    /// How far point `r` is off curve `part` of macro `g`: a ring's
+    /// radius from it, or its distance across a border's line.
+    fn onPart(l: *Local, r: PointRef, g: Geometry, part: Part) Error!D {
+        const pg = switch (g.kind) {
+            .polar_grid => |x| x,
+            else => return error.WrongKind,
+        };
+        const q = (try l.ref(r)).sub(l.p(pg.c));
+        switch (part.role) {
+            .whole => return error.WrongKind,
+            .ring => {
+                const jj = PolarGrid.index(part.k, pg.rings) orelse return error.NoSuchGeometry;
+                const fj = @as(f64, @floatFromInt(jj)) / @as(f64, @floatFromInt(@max(pg.rings, 1)));
+                const r0 = l.get(pg.r[0]);
+                return q.len().sub(r0.add(l.get(pg.r[1]).sub(r0).scale(fj)));
+            },
+            .border => {
+                const ii = PolarGrid.index(part.k, pg.cols) orelse return error.NoSuchGeometry;
+                const fi = @as(f64, @floatFromInt(ii)) / @as(f64, @floatFromInt(@max(pg.cols, 1)));
+                const t0 = l.get(pg.t[0]);
+                const t = t0.add(l.get(pg.t[1]).sub(t0).scale(fi));
+                // Across the border's direction (cos t, sin t).
+                return q.x.mul(t.sin()).sub(q.y.mul(t.cos()));
+            },
+        }
+    }
+
     /// An affine coordinate as a dual over its unknowns.
     pub fn coord(l: *Local, a: Affine) D {
         var d = D.c(a.c);
@@ -735,6 +796,10 @@ pub const Local = struct {
             .vertical => |lin| out[0] = try l.horizontalOrVertical(lin, true),
             .point_on => |po| {
                 const g = try l.geo(po.on);
+                if (!po.part.isWhole()) {
+                    out[0] = try l.onPart(po.p, g, po.part);
+                    return 1;
+                }
                 out[0] = switch (g.kind) {
                     .segment, .line, .ray => try l.signedDistance(po.p, po.on),
                     .circle => |ci| (try l.ref(po.p)).sub(l.p(ci.c)).len().sub(l.get(ci.r)),
