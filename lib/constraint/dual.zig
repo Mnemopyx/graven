@@ -61,6 +61,16 @@ pub const D = struct {
         return r;
     }
 
+    /// The angle of (x, y) from the x axis, in (-pi, pi].
+    pub fn atan2(y: D, x: D) D {
+        var r: D = .{ .v = std.math.atan2(y.v, x.v) };
+        const q = x.v * x.v + y.v * y.v;
+        if (q > 0) for (&r.d, y.d, x.d) |*o, dy, dx| {
+            o.* = (x.v * dy - y.v * dx) / q;
+        };
+        return r;
+    }
+
     pub fn sin(a: D) D {
         var r: D = .{ .v = @sin(a.v) };
         const k = @cos(a.v);

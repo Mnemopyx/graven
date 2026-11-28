@@ -2724,6 +2724,10 @@ fn frame() !dvui.App.Result {
         sample_round_rect = false;
         loadRoundRectSample();
     }
+    if (sample_arcs) {
+        sample_arcs = false;
+        loadArcsSample();
+    }
     skPruneSelection();
     ghost_pane.fieldsFollowTheme();
     const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
@@ -2791,6 +2795,8 @@ fn frame() !dvui.App.Result {
                 sample_dial = true;
             } else if (std.mem.eql(u8, which, "round-rect")) {
                 sample_round_rect = true;
+            } else if (std.mem.eql(u8, which, "arcs")) {
+                sample_arcs = true;
             } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {} else if (std.mem.eql(u8, which, "typography")) loadTypography() catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
@@ -8474,6 +8480,11 @@ var sample_dial = false;
 /// its centre, one by two corners, its corner radius
 /// applied as 6 mm; the first chosen, so Properties shows its parameters.
 var sample_round_rect = false;
+/// GRAVEN_SAMPLE=arcs: arcs as library objects in a new sketch: one by its
+/// centre (its end then applied as 200°), one through three points, and a
+/// line with a tangent arc leaving its end; the first arc chosen, so
+/// Properties shows its radius, start and end.
+var sample_arcs = false;
 var sample_texts = false;
 /// GRAVEN_SAMPLE=connections: the sketch panel sample with a second
 /// connection, its end free, a dot at its end.
@@ -21031,6 +21042,27 @@ fn loadRoundRectSample() void {
     if (skItem()) |now| skSelectObject(now.sketch, oa, false, null);
 }
 
+fn loadArcsSample() void {
+    newSketchInOwnSpace();
+    followHome();
+    if (sketch_edit == null) return;
+    const lib = skl.library;
+    const a = skEdit(.{ .arc = .{ .c = .{ .x = -35, .y = 0 }, .a = .{ .x = -20, .y = 0 }, .b = .{ .x = -35, .y = 15 }, .object = true } }) orelse return;
+    const it = skItem() orelse return;
+    const oa = skl.composite.objectOf(it.sketch, a) orelse return;
+    if ((it.sketch.groups.get(oa) catch return).paramNamed("end")) |p| _ = skEdit(.{ .param_apply = .{ .object = oa, .param = p.id, .value = std.math.degreesToRadians(200) } });
+    if (circleThrough(.{ .x = -5, .y = -5 }, .{ .x = 15, .y = -5 }, .{ .x = 5, .y = 8 })) |c| {
+        _ = skEdit(.{ .arc = .{ .c = c, .a = .{ .x = 15, .y = -5 }, .b = .{ .x = -5, .y = -5 }, .object = true } });
+    }
+    const line = skEdit(.{ .segment = .{ .a = .{ .x = 25, .y = -10 }, .b = .{ .x = 45, .y = -10 } } }) orelse return;
+    if (lib.tangentArc(.{ .x = 45, .y = -10 }, .{ .x = 1, .y = 0 }, .{ .x = 55, .y = 5 })) |ta| if (skEdit(.{ .arc = .{ .c = ta.c, .a = ta.a, .b = ta.b, .object = true } })) |g| {
+        const at: skl.PointRef = .{ .geom = g, .role = if (ta.from_p) .start else .end };
+        _ = skEdit(.{ .constrain = .{ .kind = .{ .coincident = .{ at, .{ .geom = line, .role = .end } } } } });
+        _ = skEdit(.{ .constrain = .{ .kind = .{ .normal = .{ .from = .{ .geom = g, .role = .centre }, .to = at, .line = line } } } });
+    };
+    if (skItem()) |now| skSelectObject(now.sketch, oa, false, null);
+}
+
 fn loadTessellationSample() void {
     newSketchInOwnSpace();
     followHome();
@@ -30647,12 +30679,12 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     return p;
 }
 
-const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_grid, rect_array, polygon, tessellate, dial, round_rect_centre, round_rect_corners };
+const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, arc_tangent, circle, circle_3pt, line, ray, polar_grid, rect_array, polygon, tessellate, dial, round_rect_centre, round_rect_corners };
 
 /// The geometry buttons, in order, and each one's sub-options (its tools),
 /// the first its default. A button remembers the sub-option last used.
 const SkGeo = enum { point, line, polyline, arc, circle, polygon, array, tessellate, dial, round_rect };
-const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_grid, .rect_array }, &.{.tessellate}, &.{.dial}, &.{ .round_rect_centre, .round_rect_corners } };
+const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt, .arc_tangent }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_grid, .rect_array }, &.{.tessellate}, &.{.dial}, &.{ .round_rect_centre, .round_rect_corners } };
 var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_grid, .tessellate, .dial, .round_rect_centre };
 /// The tessellate tool's tile (its sides) and whether it keeps whole
 /// tiles only, for the next tessellation.
@@ -32103,7 +32135,7 @@ fn skToolClicks(t: SkTool) usize {
     return switch (t) {
         .none => 0,
         .point => 1,
-        .segment, .polyline, .circle, .line, .ray, .rect_array, .polygon, .round_rect_centre, .round_rect_corners => 2,
+        .segment, .polyline, .circle, .line, .ray, .rect_array, .polygon, .round_rect_centre, .round_rect_corners, .arc_tangent => 2,
         .arc_centre, .arc_3pt, .circle_3pt, .polar_grid, .dial => 3,
         .tessellate => 1,
     };
@@ -32125,6 +32157,10 @@ var sk_edit_merge: ?u64 = null;
 fn skToolClick(p: geom.Point, given: SkClickGiven) void {
     sk_clicks[sk_nclicks] = p;
     sk_given[sk_nclicks] = given;
+    // A tangent arc starts on an end: the one under the pointer, locked
+    // or not.
+    if (sk_tool == .arc_tangent and sk_nclicks == 0 and given.on == null and sk_nhits > 0)
+        sk_given[0].on = sk_hits[0].pick;
     sk_nclicks += 1;
     if (sk_nclicks < skToolClicks(sk_tool)) return;
     const c = sk_clicks;
@@ -32221,8 +32257,29 @@ fn skToolClick(p: geom.Point, given: SkClickGiven) void {
             tell("No closed path round that place to fill. ");
         },
         .arc_centre => if (skDist(c[0], c[1]) > 1e-9) {
-            made = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons } });
+            made = skEdit(.{ .arc = .{ .c = c[0], .a = c[1], .b = c[2], .construction = cons, .object = true } });
             roles = .{ .{ .point = .centre }, .{ .point = .start }, .none };
+        },
+        // A tangent arc (the owner, 2026-11-28): from the end of a line or
+        // an arc, leaving it the way it runs, to the second click; joined
+        // to it and tangent there (its radius normal to a line's end; to
+        // an arc, tangent).
+        .arc_tangent => if (skTangentFrom(sk_given[0])) |from| {
+            if (skl.library.tangentArc(from.p, from.t, c[1])) |ta| {
+                made = skEdit(.{ .arc = .{ .c = ta.c, .a = ta.a, .b = ta.b, .construction = cons, .object = true } });
+                if (made) |g| {
+                    const at: skl.PointRef = .{ .geom = g, .role = if (ta.from_p) .start else .end };
+                    _ = skEdit(.{ .constrain = .{ .kind = .{ .coincident = .{ at, from.end } } } });
+                    _ = if (from.line)
+                        skEdit(.{ .constrain = .{ .kind = .{ .normal = .{ .from = .{ .geom = g, .role = .centre }, .to = at, .line = from.end.geom } } } })
+                    else
+                        skEdit(.{ .constrain = .{ .kind = .{ .tangent = .{ .a = from.end.geom, .b = g } } } });
+                    roles = .{ .none, .{ .point = if (ta.from_p) .end else .start }, .none };
+                    sk_given[0] = .{};
+                }
+            } else tell("The end is in line with where the arc leaves: no arc turns there. ");
+        } else {
+            tell("Start a tangent arc on the end of a line or an arc. ");
         },
         .circle_3pt => if (circleThrough(c[0], c[1], c[2])) |centre| {
             made = skEdit(.{ .circle = .{ .c = centre, .r = skDist(centre, c[0]), .construction = cons } });
@@ -32237,10 +32294,10 @@ fn skToolClick(p: geom.Point, given: SkClickGiven) void {
             const sweep = normAngle(std.math.atan2(c[1].y - centre.y, c[1].x - centre.x) - a0);
             const through = normAngle(std.math.atan2(c[2].y - centre.y, c[2].x - centre.x) - a0);
             if (through < sweep) {
-                made = skEdit(.{ .arc = .{ .c = centre, .a = c[0], .b = c[1], .construction = cons } });
+                made = skEdit(.{ .arc = .{ .c = centre, .a = c[0], .b = c[1], .construction = cons, .object = true } });
                 roles = .{ .{ .point = .start }, .{ .point = .end }, .on };
             } else {
-                made = skEdit(.{ .arc = .{ .c = centre, .a = c[1], .b = c[0], .construction = cons } });
+                made = skEdit(.{ .arc = .{ .c = centre, .a = c[1], .b = c[0], .construction = cons, .object = true } });
                 roles = .{ .{ .point = .end }, .{ .point = .start }, .on };
             }
         } else {
@@ -32256,6 +32313,46 @@ fn skToolClick(p: geom.Point, given: SkClickGiven) void {
         if (made) |g| sk_given[0].on = .{ .point = .{ .geom = g, .role = .end } };
         sk_nclicks = 1;
     } else sk_nclicks = 0;
+}
+
+/// Where a tangent arc starts (its first click, locked onto the end of a
+/// line or an arc): that end, the way the curve leaves it there (unit),
+/// and whether it is a line's.
+fn skTangentFrom(given: SkClickGiven) ?struct { end: skl.PointRef, p: geom.Point, t: geom.Point, line: bool } {
+    const it = skItem() orelse return null;
+    const on = given.on orelse return null;
+    const r = switch (on) {
+        .point => |q| q,
+        else => return null,
+    };
+    if (r.role != .start and r.role != .end) return null;
+    if (r.geom >= it.sketch.geometry.items.len) return null;
+    const s = it.sketch;
+    const p = s.point(r) catch return null;
+    switch (s.geometry.items[r.geom].kind) {
+        .segment => |sg| {
+            const a = s.val(sg.a);
+            const b = s.val(sg.b);
+            // Out of its end: on from its end, back from its start.
+            const dx = if (r.role == .end) b.x - a.x else a.x - b.x;
+            const dy = if (r.role == .end) b.y - a.y else a.y - b.y;
+            const l = std.math.hypot(dx, dy);
+            if (!(l > 1e-12)) return null;
+            return .{ .end = r, .p = p, .t = .{ .x = dx / l, .y = dy / l }, .line = true };
+        },
+        .arc => |ar| {
+            const cc = s.val(ar.c);
+            // Counter-clockwise along it at its end; on from its start,
+            // the other way.
+            const rx = p.x - cc.x;
+            const ry = p.y - cc.y;
+            const l = std.math.hypot(rx, ry);
+            if (!(l > 1e-12)) return null;
+            const k: f64 = if (r.role == .end) 1 else -1;
+            return .{ .end = r, .p = p, .t = .{ .x = -ry / l * k, .y = rx / l * k }, .line = false };
+        },
+        else => return null,
+    }
 }
 
 /// The polar grid tool's sweep: how far the pointer has turned about the
@@ -32991,6 +33088,7 @@ fn skConstraintText(buf: []u8, c: skl.Constraint) []const u8 {
         .equal => "Equal",
         .symmetric => "Symmetric",
         .normal => "Normal",
+        .direction => "Direction",
         .equal_distance => "Equal distance",
         .equal_angle => "Equal angles",
     };
@@ -33232,6 +33330,7 @@ fn skAnchor(s: *const skl.Sketch, c: skl.Constraint) ?geom.Point {
         .equal_angle => |e| skCornerAnchor(s, e.c, e.d),
         .symmetric => |sy| skMid(s.point(sy.p) catch return null, s.point(sy.q) catch return null),
         .normal => |nm| s.point(nm.to) catch null,
+        .direction => |d| s.point(d.b) catch null,
         .equal_distance => |e| switch (e.b) {
             .points, .x, .y => |ps| skMid(s.point(ps[0]) catch return null, s.point(ps[1]) catch return null),
             .to_line => |t| s.point(t.p) catch null,
@@ -34070,6 +34169,7 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
             },
             .symmetric => "sym",
             .normal => "\u{E000}",
+            .direction => "dir",
             .equal_distance => "=",
             .distance, .distance_x, .distance_y, .line_distance, .radius, .diameter, .angle => blk: {
                 // A reference dimension in parentheses, fainter.
@@ -34183,6 +34283,16 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 }
                 dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } });
             } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } }),
+            // A tangent arc: from the end it leaves, to the pointer.
+            .arc_tangent => if (skTangentFrom(sk_given[0])) |from| {
+                if (skl.library.tangentArc(from.p, from.t, p)) |ta| {
+                    const r = skDist(ta.c, ta.a);
+                    const a0 = std.math.atan2(ta.a.y - ta.c.y, ta.a.x - ta.c.x);
+                    const sweep = normAngle(std.math.atan2(ta.b.y - ta.c.y, ta.b.x - ta.c.x) - a0);
+                    var buf4: [4]geom.Segment = undefined;
+                    if (r > 1e-9 and sweep > 1e-9) skPreview(area, it, geom.arc(ta.c, r, a0, sweep, &buf4));
+                } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, last), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
+            },
             // A round-rect: the whole outline as it would be placed.
             .round_rect_centre, .round_rect_corners => {
                 const b = skl.library.roundRectBox(if (sk_tool == .round_rect_centre) .centre else .corners, sk_clicks[0], p);
@@ -34642,6 +34752,11 @@ fn skToolOverlay(g: SkGeo, key: dvui.Rect.Physical) void {
         dvui.label(@src(), "Dial, step {d} of 3: {s}", .{ sk_nclicks + 1, steps[@min(sk_nclicks, 2)] }, .{ .color_text = .{ .color = faint } });
         return;
     }
+    if (sk_tool == .arc_tangent) {
+        const steps = [_][]const u8{ "click the end of a line or an arc", "click where it ends" };
+        dvui.label(@src(), "Tangent arc, step {d} of 2: {s}", .{ @as(usize, @min(sk_nclicks, 1)) + 1, steps[@min(sk_nclicks, 1)] }, .{ .color_text = .{ .color = faint } });
+        return;
+    }
     if (g == .round_rect) {
         const steps = if (sk_tool == .round_rect_centre)
             [_][]const u8{ "click its centre", "click a corner" }
@@ -35008,6 +35123,7 @@ fn skConstraintIcon(c: skl.Constraint) icons.GIcon {
         .equal_distance => .con_equal_distance,
         .symmetric => .con_symmetric,
         .normal => .con_tangent,
+        .direction => .con_angle,
     };
 }
 

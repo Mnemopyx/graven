@@ -441,9 +441,22 @@ pub const Groups = struct {
         if (gs.listOf(id)) |p| try p.geometry.append(a, g);
     }
 
-    /// Constraint `c`, just added (the last), is put where it belongs.
+    /// Where a constraint the user adds belongs: its `home`, but outside
+    /// any library object round it. A library object's group holds only
+    /// its contract (the constraints made with it); a dimension the user
+    /// puts on it (pinning its width) is the user's, at the level outside,
+    /// editable there and kept when it is exploded.
+    pub fn userHome(gs: *const Groups, geo: []const Geometry, c: Constraint) GroupId {
+        var h = gs.home(geo, c);
+        while (h != none and h < gs.list.items.len and gs.list.items[h].kind == .library) h = gs.parentOf(h);
+        return h;
+    }
+
+    /// Constraint `c`, just added (the last), is put where it belongs
+    /// (`userHome`: a builder's contract is moved into its object when the
+    /// object is made).
     pub fn constraintAdded(gs: *Groups, a: Allocator, geo: []const Geometry, cons: []Constraint, c: ConstraintId) Allocator.Error!void {
-        const h = gs.home(geo, cons[c]);
+        const h = gs.userHome(geo, cons[c]);
         cons[c].group = h;
         if (gs.listOf(h)) |p| try p.constraints.append(a, c);
     }

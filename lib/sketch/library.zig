@@ -56,6 +56,16 @@ pub fn isObject(s: *const Sketch, id: GroupId) bool {
 /// What dimension `c` measures now: a length (never negative) in mm, or
 /// an angle in radians. Null when it names geometry no longer there.
 pub fn measure(s: *const Sketch, c: Constraint) ?f64 {
+    // A direction: from the x axis, counter-clockwise, in [0, 2 pi).
+    if (c.kind == .direction) {
+        const d = c.kind.direction;
+        const p = s.point(d.a) catch return null;
+        const q = s.point(d.b) catch return null;
+        const t = std.math.atan2(q.y - p.y, q.x - p.x);
+        // Just under zero (a solved 0 degrees) reads as 0, not 360.
+        if (t < 0 and t > -1e-9) return 0;
+        return if (t < 0) t + 2 * std.math.pi else t;
+    }
     const v = s.measure(c) orelse return null;
     return switch (c.kind) {
         .angle => v,
@@ -79,6 +89,7 @@ fn held(s: *const Sketch, c: Constraint, v: f64) Constraint {
     k.group = group.none;
     switch (k.kind) {
         .angle => |*d| d.value = v,
+        .direction => |*d| d.value = v,
         .line_distance => |*d| {
             d.value = @abs(v);
             d.side = 1;
@@ -288,6 +299,42 @@ pub fn addRoundRect(s: *Sketch, a: Allocator, variant: RoundRectVariant, b: geom
     return id;
 }
 
+// Arc ---------------------------------------------------------------------------
+
+pub const arc_type = "arc";
+
+/// Adds an arc as a library object (the owner, 2026-11-28: parameterized
+/// arcs): about `c`, counter-clockwise from `p0` to `p1`'s angle. It has
+/// no contract beyond its own (its ends on one circle); its parameters `r`
+/// (its radius), `start` and `end` (its ends' directions from its centre,
+/// counter-clockwise from the x axis). However it was placed (by its
+/// centre, by three points, tangent to a line), it is the same object.
+/// Returns its geometry; its object is that geometry's group.
+pub fn addArc(s: *Sketch, a: Allocator, c: Point, p0: Point, p1: Point, construction: bool) Error!GeomId {
+    const g = try s.addArc(a, c, p0, p1, construction);
+    const id = try s.makeGroup(a, &.{g}, &.{}, .library, true);
+    try s.groups.setTypeName(a, id, arc_type);
+    _ = try s.groups.addParam(a, id, "r", .length, .mm, .{ .kind = .{ .radius = .{ .g = g, .value = 0 } } });
+    _ = try s.groups.addParam(a, id, "start", .angle, .deg, .{ .kind = .{ .direction = .{ .a = .{ .geom = g, .role = .centre }, .b = .{ .geom = g, .role = .start }, .value = 0 } } });
+    _ = try s.groups.addParam(a, id, "end", .angle, .deg, .{ .kind = .{ .direction = .{ .a = .{ .geom = g, .role = .centre }, .b = .{ .geom = g, .role = .end }, .value = 0 } } });
+    return g;
+}
+
+/// The arc tangent at `p` to direction `t` (a unit vector, the way it
+/// leaves `p`) that ends at `q`: its centre and its ends counter-clockwise
+/// (`from_p`: it runs from `p`, else to it). Null when `q` is on the line.
+pub fn tangentArc(p: Point, t: Point, q: Point) ?struct { c: Point, a: Point, b: Point, from_p: bool } {
+    const n: Point = .{ .x = -t.y, .y = t.x };
+    const dx = q.x - p.x;
+    const dy = q.y - p.y;
+    const along = n.x * dx + n.y * dy;
+    if (@abs(along) < 1e-9 * @max(1, @sqrt(dx * dx + dy * dy))) return null;
+    const rho = (dx * dx + dy * dy) / (2 * along);
+    const c: Point = .{ .x = p.x + n.x * rho, .y = p.y + n.y * rho };
+    // Turning left (centre to its left): counter-clockwise from p.
+    return if (rho > 0) .{ .c = c, .a = p, .b = q, .from_p = true } else .{ .c = c, .a = q, .b = p, .from_p = false };
+}
+
 // Tests -------------------------------------------------------------------------
 
 const testing = std.testing;
@@ -376,17 +423,17 @@ test "a dimension the user placed wins over a parameter; explode leaves ordinary
     // Its width pinned by an ordinary dimension, outside the object's
     // contract (it names only its members, but is the user's).
     const g = try object(&s, id);
-    var pin = g.param(w).?.measure;
-    pin.kind.line_distance.value = 40;
-    const before = s.constraints.items.len;
-    try s.constraints.append(gpa, held(&s, pin, 40));
+    const pin = try s.addConstraint(gpa, held(&s, g.param(w).?.measure, 40));
+    // The user's, so outside the object: not part of its contract.
+    try testing.expectEqual(group.none, s.constraints.items[pin].group);
+    try testing.expect(!root.composite.sealedConstraint(&s, pin));
     _ = try s.solve(gpa);
     try testing.expectError(error.Conflict, apply(&s, gpa, gpa, id, w, 55));
     try testing.expectApproxEqAbs(40, try value(&s, id, w), 1e-9);
     // Its height still applies.
     try apply(&s, gpa, gpa, id, try param(&s, id, "h"), 30);
     try testing.expectApproxEqAbs(30, try value(&s, id, try param(&s, id, "h")), 1e-6);
-    _ = s.constraints.orderedRemove(before);
+    try s.removeConstraint(pin);
     // Exploded: no object, no parameters; the contract stays, ordinary.
     const n = s.constraints.items.len;
     try explode(&s, gpa, id);
@@ -418,4 +465,45 @@ test "an object of a type this Graven does not know is still measured and applie
         c.deinit(gpa);
     }
     try testing.expectApproxEqAbs(25, try value(&c, id, len), 1e-6);
+}
+
+test "an arc as a library object: radius, start and end applied one at a time, a user dimension outside it" {
+    const gpa = testing.allocator;
+    var s = try Sketch.init(gpa);
+    defer s.deinit(gpa);
+    const g = try addArc(&s, gpa, .{ .x = 0, .y = 0 }, .{ .x = 10, .y = 0 }, .{ .x = 0, .y = 10 }, false);
+    _ = try s.solve(gpa);
+    const id = s.geometry.items[g].group;
+    try testing.expectEqualStrings(arc_type, (try object(&s, id)).type_name);
+    const r = try param(&s, id, "r");
+    const start = try param(&s, id, "start");
+    const end = try param(&s, id, "end");
+    try testing.expectApproxEqAbs(10, try value(&s, id, r), 1e-9);
+    try testing.expectApproxEqAbs(0, try value(&s, id, start), 1e-9);
+    try testing.expectApproxEqAbs(std.math.pi / 2.0, try value(&s, id, end), 1e-9);
+    // The end swung round to 200 degrees, past a half turn: start and
+    // radius held.
+    try apply(&s, gpa, gpa, id, end, std.math.degreesToRadians(200));
+    try testing.expectApproxEqAbs(std.math.degreesToRadians(200), try value(&s, id, end), 1e-6);
+    try testing.expectApproxEqAbs(0, try value(&s, id, start), 1e-6);
+    try testing.expectApproxEqAbs(10, try value(&s, id, r), 1e-6);
+    try apply(&s, gpa, gpa, id, r, 4);
+    try testing.expectApproxEqAbs(4, try value(&s, id, r), 1e-6);
+    try testing.expectApproxEqAbs(std.math.degreesToRadians(200), try value(&s, id, end), 1e-6);
+    // A radius dimension the user puts on it is the user's, not its own.
+    const dim = try s.addConstraint(gpa, .{ .kind = .{ .radius = .{ .g = g, .value = 4 } } });
+    try testing.expect(!root.composite.sealedConstraint(&s, dim));
+    try testing.expect(!root.composite.sealsConstraint(&s, s.constraints.items[dim]));
+    try testing.expectError(error.Conflict, apply(&s, gpa, gpa, id, r, 6));
+}
+
+test "a tangent arc leaves a line's end along it, turning either way" {
+    const left = tangentArc(.{ .x = 0, .y = 0 }, .{ .x = 1, .y = 0 }, .{ .x = 10, .y = 10 }).?;
+    try testing.expect(left.from_p);
+    try testing.expectApproxEqAbs(0, left.c.x, 1e-9);
+    try testing.expectApproxEqAbs(10, left.c.y, 1e-9);
+    const right = tangentArc(.{ .x = 0, .y = 0 }, .{ .x = 1, .y = 0 }, .{ .x = 10, .y = -10 }).?;
+    try testing.expect(!right.from_p);
+    try testing.expectApproxEqAbs(-10, right.c.y, 1e-9);
+    try testing.expect(tangentArc(.{ .x = 0, .y = 0 }, .{ .x = 1, .y = 0 }, .{ .x = 5, .y = 0 }) == null);
 }

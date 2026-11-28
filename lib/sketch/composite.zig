@@ -411,7 +411,7 @@ pub fn sealedConstraint(s: *const Sketch, c: root.ConstraintId) bool {
 /// Constraint `c`, added, would be internal to an object: everything it
 /// names is in one. One naming something outside too is external.
 pub fn sealsConstraint(s: *const Sketch, c: Constraint) bool {
-    return sealedBy(s, s.groups.objectOf(s.groups.home(s.geometry.items, c)));
+    return sealedBy(s, s.groups.objectOf(s.groups.userHome(s.geometry.items, c)));
 }
 
 /// Whether a constraint homed in object `o` is its own (not editable). A
