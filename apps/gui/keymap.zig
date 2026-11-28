@@ -662,6 +662,7 @@ pub const binds = [_]B{
     .{ .mode = "sketch", .chord = "five", .action = "sketch.palette.*", .arg = 4 },
     .{ .mode = "sketch", .chord = "six", .action = "sketch.palette.*", .arg = 5 },
     .{ .mode = "sketch", .chord = "seven", .action = "sketch.palette.*", .arg = 6 },
+    .{ .mode = "sketch", .chord = "eight", .action = "sketch.palette.*", .arg = 7 },
     .{ .mode = "sketch", .chord = "delete", .action = "sketch.delete" },
     .{ .mode = "sketch", .chord = "backspace", .action = "sketch.delete" },
     .{ .mode = "sketch", .chord = "c", .action = "sketch.constraint.coincident" },

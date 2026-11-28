@@ -1490,6 +1490,11 @@ pub const SketchEdit = union(enum) {
     /// (radians, either order; a turn apart: all the way round), `cols`
     /// sections round and `rings` out.
     polar_grid: struct { c: geom.Point, r: [2]f64, t: [2]f64, cols: u32, rings: u32 },
+    /// A tessellation, a macro object (`sketch_.composite.addTessellation`):
+    /// the smallest closed path of the sketch's curves round `at` filled
+    /// with tiles of `sides` (3, 4, 6), one centred at `at`, `spacing` mm
+    /// apart centre to centre (0: a fifth of the area's smaller side).
+    tessellate: struct { at: geom.Point, sides: u32 = 6, spacing: f64 = 0, whole: bool = false },
     /// A regular polygon (see `sketch_.polygon`) of `sides`, centred at
     /// `c`, a corner at `corner`.
     polygon: struct { c: geom.Point, corner: geom.Point, sides: u32, construction: bool = false },
@@ -6217,6 +6222,22 @@ pub const Model = struct {
                     .polar => |p| p.centre,
                     .rect => |q| q.left,
                 };
+            },
+            .tessellate => |e| {
+                const loop = (try sketch_.pieces.loopAround(sk, al, e.at)) orelse return error.NotEnclosed;
+                var ps: std.ArrayList(sketch_.pieces.Piece) = .empty;
+                for (loop) |f| if (try sketch_.pieces.attach(sk, al, f, true)) |p| try ps.append(al, p);
+                if (ps.items.len == 0) return error.NotEnclosed;
+                var spacing = e.spacing;
+                if (!(spacing > 0)) {
+                    var segs: std.ArrayList(geom.Segment) = .empty;
+                    for (ps.items) |p| try sketch_.pieces.appendSegments(sk, al, p, &segs);
+                    var b: geom.Box = .empty;
+                    for (segs.items) |sg| b = b.join(sg.bounds());
+                    spacing = if (b.isEmpty()) 10 else @max(0.5, @min(b.width(), b.height()) / 5);
+                }
+                const obj = sketch_.composite.addTessellation(sk, al, ps.items, e.at, e.sides, spacing, e.whole) catch |err| return compositeError(err);
+                out = sketch_.composite.macroGeometry(sk, obj) orelse return error.BadSize;
             },
             .polar_grid => |e| {
                 const obj = sketch_.composite.addPolarGrid(sk, al, e.c, e.r[0], e.r[1], e.t[0], e.t[1], e.cols, e.rings) catch |err| return compositeError(err);

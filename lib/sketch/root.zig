@@ -33,6 +33,8 @@ pub const composite = @import("composite.zig");
 /// Pieces of curves between their cuts (ends, points on them, crossings),
 /// chosen for ink and fills.
 pub const pieces = @import("pieces.zig");
+/// Tessellations: areas filled with tiles, macro objects.
+pub const tessellation = @import("tessellation.zig");
 
 const Allocator = std.mem.Allocator;
 const Point = geom.Point;
@@ -115,6 +117,9 @@ pub const Sketch = struct {
     /// geometry and constraint names its innermost group, and each group
     /// lists its members, rebuilt from those (`rebuildGroups`) on reading.
     groups: group.Groups = .{},
+    /// The areas its tessellations fill (`Geometry.tessellation.outline`
+    /// indexes it): each a closed path of its curves, as pieces.
+    tilings: std.ArrayList(tessellation.Outline) = .empty,
 
     pub fn init(a: Allocator) Error!Sketch {
         var s: Sketch = .{};
@@ -135,6 +140,8 @@ pub const Sketch = struct {
         for (s.connectors.items) |*c| c.path.deinit(a);
         s.connectors.deinit(a);
         s.groups.deinit(a);
+        for (s.tilings.items) |*t| t.pieces.deinit(a);
+        s.tilings.deinit(a);
     }
 
     /// A copy in `a`, sharing nothing with this one (constraint names
@@ -158,20 +165,25 @@ pub const Sketch = struct {
             try c.connectors.append(a, copy);
         }
         c.groups = try s.groups.clone(a);
+        for (s.tilings.items) |t| {
+            var copy: tessellation.Outline = .{};
+            try copy.pieces.appendSlice(a, t.pieces.items);
+            try c.tilings.append(a, copy);
+        }
         return c;
     }
 
-    fn newVar(s: *Sketch, a: Allocator, v: f64, fixed: bool) Allocator.Error!VarId {
+    pub fn newVar(s: *Sketch, a: Allocator, v: f64, fixed: bool) Allocator.Error!VarId {
         try s.vars.append(a, v);
         try s.fixed.append(a, fixed);
         return @intCast(s.vars.items.len - 1);
     }
 
-    fn pt(s: *Sketch, a: Allocator, p: Point, fixed: bool) Allocator.Error!Pt {
+    pub fn pt(s: *Sketch, a: Allocator, p: Point, fixed: bool) Allocator.Error!Pt {
         return .{ .x = try s.newVar(a, p.x, fixed), .y = try s.newVar(a, p.y, fixed) };
     }
 
-    fn add(s: *Sketch, a: Allocator, g: Geometry) Allocator.Error!GeomId {
+    pub fn add(s: *Sketch, a: Allocator, g: Geometry) Allocator.Error!GeomId {
         try s.geometry.append(a, g);
         return @intCast(s.geometry.items.len - 1);
     }
@@ -253,6 +265,7 @@ pub const Sketch = struct {
             .line => |ln| &.{ ln.theta, ln.rho },
             .ray => |ry| &.{ ry.o.x, ry.o.y, ry.angle },
             .polar_grid => |pg| &.{ pg.c.x, pg.c.y, pg.r[0], pg.r[1], pg.t[0], pg.t[1] },
+            .tessellation => |t| &.{ t.c.x, t.c.y, t.spacing, t.angle, t.margin },
         };
         @memcpy(buf[0..list.len], list);
         return buf[0..list.len];
@@ -775,7 +788,7 @@ pub const Sketch = struct {
         return null;
     }
 
-    fn val(s: *const Sketch, p: Pt) Point {
+    pub fn val(s: *const Sketch, p: Pt) Point {
         return .{ .x = s.vars.items[p.x], .y = s.vars.items[p.y] };
     }
 
@@ -799,6 +812,7 @@ pub const Sketch = struct {
                 try out.appendSlice(a, segs);
             },
             .polar_grid => |pg| try s.polarGridSegments(a, pg, out),
+            .tessellation => |t| try tessellation.appendEdges(s, a, t, out),
             .point, .affine, .line, .ray => {},
         }
     }
@@ -881,4 +895,5 @@ test {
     _ = connector;
     _ = composite;
     _ = pieces;
+    _ = tessellation;
 }

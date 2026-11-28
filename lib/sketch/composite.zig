@@ -97,13 +97,64 @@ pub fn addPolarGrid(s: *Sketch, a: Allocator, c: Point, r0: f64, r1: f64, t0: f6
     return id;
 }
 
-/// A macro object's one geometry (a polar grid's), if it is one.
+/// A tessellation as a macro object (the owner, 2026-11-28): one
+/// geometry (`tessellation.add`'s), filling the closed path `outline`,
+/// its driving unknowns a tile's centre, the spacing, the turn and the
+/// margin; its tile's sides and whether only whole tiles are kept are
+/// properties. Nothing is made again when any of them changes.
+pub fn addTessellation(s: *Sketch, a: Allocator, outline: []const root.pieces.Piece, c: Point, sides: u32, spacing: f64, whole: bool) Error!GroupId {
+    const first = s.geometry.items.len;
+    _ = try root.tessellation.add(s, a, outline, c, sides, spacing, whole);
+    const id = try seal(s, a, first, .tessellation);
+    try s.groups.setProp(a, id, "sides", @floatFromInt(sides));
+    try s.groups.setProp(a, id, "whole", if (whole) 1 else 0);
+    return id;
+}
+
+/// A macro object's one geometry (a polar grid's, a tessellation's), if
+/// it is one.
 pub fn macroGeometry(s: *const Sketch, id: GroupId) ?GeomId {
     const g = s.groups.get(id) catch return null;
-    if (g.kind != .polar_grid or g.geometry.items.len == 0) return null;
+    if (!isMacro(g.kind) or g.geometry.items.len == 0) return null;
     const m = g.geometry.items[0];
-    if (m >= s.geometry.items.len or s.geometry.items[m].kind != .polar_grid) return null;
-    return m;
+    if (m >= s.geometry.items.len) return null;
+    return switch (s.geometry.items[m].kind) {
+        .polar_grid, .tessellation => m,
+        else => null,
+    };
+}
+
+/// A tessellation's value `name` set: its properties `sides` (3, 4, 6)
+/// and `whole` (0 or 1), or its driving values `spacing`, `angle`
+/// (radians), `margin`, `x` and `y` (its tile centre). Nothing is made
+/// again: its tiles are worked out from these.
+fn setTessellation(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f64) Error!void {
+    const m = macroGeometry(s, id) orelse return error.NotAnObject;
+    const t = &s.geometry.items[m].kind.tessellation;
+    const v = s.vars.items;
+    const eq = std.mem.eql;
+    if (!std.math.isFinite(value)) return error.WrongKind;
+    if (eq(u8, name, "sides")) {
+        const n: u32 = @intFromFloat(@max(0, @round(value)));
+        if (!root.tessellation.validSides(n)) return error.WrongKind;
+        t.sides = n;
+        try s.groups.setProp(a, id, name, @floatFromInt(n));
+    } else if (eq(u8, name, "whole")) {
+        t.whole = value != 0;
+        try s.groups.setProp(a, id, name, if (t.whole) 1 else 0);
+    } else if (eq(u8, name, "spacing")) {
+        if (!(value > 0)) return error.WrongKind;
+        v[t.spacing] = value;
+    } else if (eq(u8, name, "angle")) {
+        v[t.angle] = value;
+    } else if (eq(u8, name, "margin")) {
+        if (value < 0) return error.WrongKind;
+        v[t.margin] = value;
+    } else if (eq(u8, name, "x")) {
+        v[t.c.x] = value;
+    } else if (eq(u8, name, "y")) {
+        v[t.c.y] = value;
+    } else return error.WrongKind;
 }
 
 /// The constraints on bind points a macro object no longer has (a count
@@ -305,7 +356,7 @@ fn sealedBy(s: *const Sketch, o: GroupId) bool {
 
 /// A macro object: driving geometry and counts, made by no constraints.
 pub fn isMacro(kind: group.Kind) bool {
-    return kind == .polar_grid;
+    return kind == .polar_grid or kind == .tessellation;
 }
 
 /// Where object `id` is now.
@@ -384,7 +435,7 @@ pub fn place(s: *Sketch, a: Allocator, id: GroupId, to: Placement) Error!void {
     try s.groups.internalGeometry(a, id, &members);
     // Checked first, so a map that cannot be made changes nothing.
     for (members.items) |g| switch (s.geometry.items[g].kind) {
-        .circle, .polar_grid => if (map.scale() == null) return error.WrongKind,
+        .circle, .polar_grid, .tessellation => if (map.scale() == null) return error.WrongKind,
         .affine => return error.WrongKind,
         else => {},
     };
@@ -437,6 +488,13 @@ pub fn place(s: *Sketch, a: Allocator, id: GroupId, to: Placement) Error!void {
                 v[pg.t[0]] += turn;
                 v[pg.t[1]] += turn;
             },
+            .tessellation => |t| {
+                // Its tile centre mapped, its spacing scaled, its turn
+                // turned (the area it fills is the sketch's, not its own).
+                P.set(v, map, t.c);
+                v[t.spacing] *= map.scale() orelse 1;
+                v[t.angle] += std.math.atan2(map.yx, map.xx);
+            },
             .affine => unreachable,
         }
     }
@@ -462,6 +520,7 @@ pub fn setProp(s: *Sketch, a: Allocator, id: GroupId, name: []const u8, value: f
     const g = try s.groups.get(id);
     if (g.kind == .plain or g.kind == .connection or g.kind == .caption) return error.NotAnObject;
     if (g.kind == .polar_grid) return setCount(s, a, id, name, value, remap);
+    if (g.kind == .tessellation) return setTessellation(s, a, id, name, value);
     const kind = g.kind;
     const where = try placement(s, g);
     const old_roles = try roles(s, a, g);
