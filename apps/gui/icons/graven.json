@@ -44,6 +44,14 @@
    {
     "key": "#8fc1f0",
     "name": "focus"
+   },
+   {
+    "key": "#ff5a1f",
+    "name": "hot"
+   },
+   {
+    "key": "#d4e4ef",
+    "name": "result"
    }
   ],
   "schemes": {
@@ -55,7 +63,9 @@
      "base": "#2f7e70",
      "subject": "#a77f12",
      "mark": "#b14a33",
-     "focus": "#2a6fae"
+     "focus": "#2a6fae",
+     "hot": "#ff7a3d",
+     "result": "#34495a"
     }
    }
   }
@@ -284,7 +294,7 @@
   },
   {
    "index": 13,
-   "icon": "constrain",
+   "icon": "roundrect-corners",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -301,7 +311,7 @@
   },
   {
    "index": 14,
-   "icon": "pane-browser",
+   "icon": "roundrect-centre",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -318,7 +328,7 @@
   },
   {
    "index": 15,
-   "icon": "pane-properties",
+   "icon": "constrain",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -335,7 +345,7 @@
   },
   {
    "index": 16,
-   "icon": "pane-expression-bar",
+   "icon": "pane-browser",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -352,7 +362,7 @@
   },
   {
    "index": 17,
-   "icon": "pane-log",
+   "icon": "pane-properties",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -369,7 +379,7 @@
   },
   {
    "index": 18,
-   "icon": "geo-point",
+   "icon": "pane-expression-bar",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -386,7 +396,7 @@
   },
   {
    "index": 19,
-   "icon": "geo-segment",
+   "icon": "pane-log",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -403,7 +413,7 @@
   },
   {
    "index": 20,
-   "icon": "geo-circle",
+   "icon": "geo-point",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -420,7 +430,7 @@
   },
   {
    "index": 21,
-   "icon": "geo-arc",
+   "icon": "geo-segment",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -437,7 +447,7 @@
   },
   {
    "index": 22,
-   "icon": "geo-line",
+   "icon": "geo-circle",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -454,7 +464,7 @@
   },
   {
    "index": 23,
-   "icon": "geo-ray",
+   "icon": "geo-arc",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -471,7 +481,7 @@
   },
   {
    "index": 24,
-   "icon": "geo-edge",
+   "icon": "geo-line",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -488,7 +498,7 @@
   },
   {
    "index": 25,
-   "icon": "con-coincident",
+   "icon": "geo-ray",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -505,7 +515,7 @@
   },
   {
    "index": 26,
-   "icon": "con-horizontal",
+   "icon": "geo-edge",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -522,7 +532,7 @@
   },
   {
    "index": 27,
-   "icon": "con-vertical",
+   "icon": "con-coincident",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -539,7 +549,7 @@
   },
   {
    "index": 28,
-   "icon": "con-on-object",
+   "icon": "con-horizontal",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -556,7 +566,7 @@
   },
   {
    "index": 29,
-   "icon": "con-locked",
+   "icon": "con-vertical",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -573,7 +583,7 @@
   },
   {
    "index": 30,
-   "icon": "con-distance",
+   "icon": "con-on-object",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -590,7 +600,7 @@
   },
   {
    "index": 31,
-   "icon": "con-distance-x",
+   "icon": "con-locked",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -607,7 +617,7 @@
   },
   {
    "index": 32,
-   "icon": "con-distance-y",
+   "icon": "con-distance",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -624,7 +634,7 @@
   },
   {
    "index": 33,
-   "icon": "con-line-distance",
+   "icon": "con-distance-x",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -641,7 +651,7 @@
   },
   {
    "index": 34,
-   "icon": "con-radius",
+   "icon": "con-distance-y",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -658,7 +668,7 @@
   },
   {
    "index": 35,
-   "icon": "con-diameter",
+   "icon": "con-line-distance",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -675,7 +685,7 @@
   },
   {
    "index": 36,
-   "icon": "con-angle",
+   "icon": "con-radius",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -692,7 +702,7 @@
   },
   {
    "index": 37,
-   "icon": "con-parallel",
+   "icon": "con-diameter",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -709,7 +719,7 @@
   },
   {
    "index": 38,
-   "icon": "con-perpendicular",
+   "icon": "con-angle",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -726,7 +736,7 @@
   },
   {
    "index": 39,
-   "icon": "con-tangent",
+   "icon": "con-parallel",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -743,7 +753,7 @@
   },
   {
    "index": 40,
-   "icon": "con-equal",
+   "icon": "con-perpendicular",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -760,7 +770,7 @@
   },
   {
    "index": 41,
-   "icon": "con-equal-distance",
+   "icon": "con-tangent",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -777,7 +787,7 @@
   },
   {
    "index": 42,
-   "icon": "con-symmetric",
+   "icon": "con-equal",
    "advance": 1.0,
    "planeBounds": {
     "left": 0.0,
@@ -789,6 +799,40 @@
     "left": 148,
     "top": 364,
     "right": 212,
+    "bottom": 428
+   }
+  },
+  {
+   "index": 43,
+   "icon": "con-equal-distance",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 220,
+    "top": 364,
+    "right": 284,
+    "bottom": 428
+   }
+  },
+  {
+   "index": 44,
+   "icon": "con-symmetric",
+   "advance": 1.0,
+   "planeBounds": {
+    "left": 0.0,
+    "top": 0.0,
+    "right": 1.0,
+    "bottom": 1.0
+   },
+   "atlasBounds": {
+    "left": 292,
+    "top": 364,
+    "right": 356,
     "bottom": 428
    }
   }
