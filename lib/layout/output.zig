@@ -170,7 +170,7 @@ pub fn panelSvg(gpa: std.mem.Allocator, placed: *const place.Placed, faces: []co
     if (opts.labels) for (placed.labels) |l| {
         const outlines = try l.render.outlines(a, faces);
         for (outlines) |o| {
-            const moved = try o.transformed(a, .translate(l.origin.x, l.origin.y));
+            const moved = try o.transformed(a, l.frame());
             if (placed.edge) |e| {
                 for (try geom.boolean.clip(a, &.{moved}, e)) |k| try path(w, k);
             } else try path(w, moved);

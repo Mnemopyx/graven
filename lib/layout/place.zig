@@ -79,7 +79,36 @@ pub const PlacedLabel = struct {
     style: StyleId,
     /// Owned by the `Labels` cache, valid until it next changes.
     render: *const rendering.Render,
+    /// Its turn about `origin`, radians anticlockwise (its track's
+    /// `turn`): the render's geometry is turned so, then moved there.
+    turn: f64 = 0,
+
+    /// Where the render's geometry goes in the panel frame: turned, then
+    /// moved to `origin`.
+    pub fn frame(l: PlacedLabel) geom.Affine {
+        const c = @cos(l.turn);
+        const s = @sin(l.turn);
+        return .{ .a = c, .b = s, .c = -s, .d = c, .e = l.origin.x, .f = l.origin.y };
+    }
+
+    /// Box `b` in the render's frame, as placed (its bounds once turned).
+    pub fn placedBox(l: PlacedLabel, b: Box) Box {
+        const f = l.frame();
+        var out: Box = .empty;
+        for ([_]Point{ .{ .x = b.x0, .y = b.y0 }, .{ .x = b.x1, .y = b.y0 }, .{ .x = b.x0, .y = b.y1 }, .{ .x = b.x1, .y = b.y1 } }) |q| out = out.addPoint(f.apply(q));
+        return out;
+    }
 };
+
+/// Turns box `b` about `o` by (cos, sin) `cs`: its bounds once turned.
+fn turnedBox(b: Box, o: Point, cs: [2]f64) Box {
+    var out: Box = .empty;
+    for ([_]Point{ .{ .x = b.x0, .y = b.y0 }, .{ .x = b.x1, .y = b.y0 }, .{ .x = b.x0, .y = b.y1 }, .{ .x = b.x1, .y = b.y1 } }) |q| {
+        const d: Point = .{ .x = q.x - o.x, .y = q.y - o.y };
+        out = out.addPoint(.{ .x = o.x + cs[0] * d.x - cs[1] * d.y, .y = o.y + cs[1] * d.x + cs[0] * d.y });
+    }
+    return out;
+}
 
 /// Why a prototype sketch gives no shape for a tile's size and parameters.
 pub const SketchFault = union(enum) {
@@ -2091,13 +2120,39 @@ pub fn solveWith(gpa: Allocator, m: *const Model, parent: model.Parent, labels: 
         try issues.append(a, .{ .kind = kind, .tile = synth_owner.items[r], .slot = synth_which.items[r], .syntax = i.syntax });
     }
 
+    // Turned tracks: placed as unturned, then turned whole about their
+    // origins, their text and their bands (as bounds).
+    {
+        const regs_here = m.regionsIn(parent);
+        for (placed_labels.items) |*l| {
+            const r = l.run orelse continue;
+            if (!r.parent.eql(parent) or r.region >= regs_here.len) continue;
+            const deg = regs_here[r.region].turn;
+            if (deg == 0) continue;
+            const o = regs_here[r.region].origin;
+            const t = std.math.degreesToRadians(deg);
+            const cs = [2]f64{ @cos(t), @sin(t) };
+            const d: Point = .{ .x = l.origin.x - o.x, .y = l.origin.y - o.y };
+            l.origin = .{ .x = o.x + cs[0] * d.x - cs[1] * d.y, .y = o.y + cs[1] * d.x + cs[0] * d.y };
+            l.box = turnedBox(l.box, o, cs);
+            l.turn = t;
+        }
+        for (tracks.items) |*tr| {
+            if (!tr.parent.eql(parent) or tr.member >= regs_here.len) continue;
+            const deg = regs_here[tr.member].turn;
+            if (deg == 0) continue;
+            const t = std.math.degreesToRadians(deg);
+            tr.box = turnedBox(tr.box, regs_here[tr.member].origin, .{ @cos(t), @sin(t) });
+        }
+    }
+
     // Runs of text in tracks reach past the tiles' boxes: the bounds hold
     // their ink too, so a canvas with only text still has extents.
     for (placed_labels.items) |l| {
         if (l.tile != null) continue;
         const ink = l.render.ink;
         if (ink.isEmpty()) continue;
-        bounds = bounds.join(.{ .x0 = l.origin.x + ink.x0, .y0 = l.origin.y + ink.y0, .x1 = l.origin.x + ink.x1, .y1 = l.origin.y + ink.y1 });
+        bounds = bounds.join(l.placedBox(ink));
     }
 
     // A panel's edge; a workspace has none, nor anything to cut through.

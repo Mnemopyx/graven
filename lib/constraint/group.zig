@@ -51,6 +51,9 @@ pub const Kind = enum {
     /// A polar grid, a macro object: one `geometry.PolarGrid`, its counts
     /// properties (`columns`, `rings`).
     polar_grid,
+    /// A dial, a polar grid's style: one `geometry.PolarGrid` with its
+    /// `dial` set, its properties `large`, `small`, `clockwise`.
+    dial,
     /// A tessellation, a macro object: one `geometry.Tessellation`, its
     /// tile's sides and `whole` properties.
     tessellation,

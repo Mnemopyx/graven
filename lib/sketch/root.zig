@@ -102,6 +102,33 @@ pub fn polarGridShape(a: Allocator, c: Point, r: [2]f64, t: [2]f64, cols: u32, r
     };
 }
 
+/// A dial's ticks as drawn, from its values (radii outer, large inner,
+/// small inner, labels): its outer ring (an arc across its sweep, or a
+/// circle), then each tick, large every `per + 1`th. Its labels' ring is
+/// not drawn (its bind points show where they sit). Also its outline while
+/// it is being placed.
+pub fn dialShape(a: Allocator, c: Point, radii: [4]f64, t: [2]f64, large: u32, per: u32, out: *std.ArrayList(geom.Segment)) Allocator.Error!void {
+    var buf: [4]geom.Segment = undefined;
+    const sweep = t[1] - t[0];
+    const full = @abs(@abs(sweep) - 2 * std.math.pi) < 1e-9;
+    if (radii[0] > 1e-9) {
+        if (full) {
+            try out.appendSlice(a, geom.arc(c, radii[0], 0, 2 * std.math.pi, &buf));
+        } else if (@abs(sweep) > 1e-12) {
+            try out.appendSlice(a, geom.arc(c, radii[0], if (sweep > 0) t[0] else t[0] + sweep, @abs(sweep), &buf));
+        }
+    }
+    const nc = @max(large, 1) * (per + 1);
+    const n: u32 = if (full) nc else nc + 1;
+    for (0..n) |i| {
+        const ti = t[0] + sweep * @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(nc));
+        const d: Point = .{ .x = @cos(ti), .y = @sin(ti) };
+        const r1 = if (i % (per + 1) == 0) radii[1] else radii[2];
+        if (@abs(r1 - radii[0]) < 1e-9) continue;
+        try out.append(a, .{ .line = .{ .{ .x = c.x + radii[0] * d.x, .y = c.y + radii[0] * d.y }, .{ .x = c.x + r1 * d.x, .y = c.y + r1 * d.y } } });
+    }
+}
+
 /// A sketch's data, unmanaged: whoever holds it passes the allocator its
 /// lists live in (`a`), and scratch space for solving (`gpa`).
 pub const Sketch = struct {
@@ -238,13 +265,33 @@ pub const Sketch = struct {
         } }, .construction = construction });
     }
 
+    /// A dial (`geometry.PolarGrid.Dial`, a polar grid's style): about
+    /// `c`, its ticks from radius `radii[0]` in to `radii[1]` (large) or
+    /// `radii[2]` (small), its labels at `radii[3]`, from angle `t0` to
+    /// `t1` (radians), `large` large ticks' intervals with `per` small
+    /// ticks between two large. Construction unless `construction` is
+    /// false.
+    pub fn addDial(s: *Sketch, a: Allocator, c: Point, radii: [4]f64, t0: f64, t1: f64, large: u32, per: u32, construction: bool) Error!GeomId {
+        if (large == 0) return error.WrongKind;
+        var v: [4]VarId = undefined;
+        for (radii, &v) |r, *o| o.* = try s.newVar(a, @max(r, 0), false);
+        return s.add(a, .{ .kind = .{ .polar_grid = .{
+            .c = try s.pt(a, c, false),
+            .r = .{ v[0], v[1] },
+            .t = .{ try s.newVar(a, t0, false), try s.newVar(a, t1, false) },
+            .cols = large * (per + 1),
+            .rings = 3,
+            .dial = .{ .per = per, .small = v[2], .label = v[3] },
+        } }, .construction = construction });
+    }
+
     /// Removes geometry `g` and every constraint on it. Its ID stays
     /// taken; its unknowns are fixed, so they count for nothing.
     pub fn removeGeometry(s: *Sketch, g: GeomId) Error!void {
         const geo = try s.get(g);
         if (geo.reference) return error.WrongKind;
         geo.removed = true;
-        var buf: [6]VarId = undefined;
+        var buf: [8]VarId = undefined;
         for (s.varsOf(geo.*, &buf)) |v| s.fixed.items[v] = true;
         var i: usize = s.constraints.items.len;
         while (i > 0) {
@@ -254,7 +301,7 @@ pub const Sketch = struct {
     }
 
     /// The unknowns of a geometry, in `buf`.
-    pub fn varsOf(_: *const Sketch, g: Geometry, buf: *[6]VarId) []VarId {
+    pub fn varsOf(_: *const Sketch, g: Geometry, buf: *[8]VarId) []VarId {
         const list: []const VarId = switch (g.kind) {
             .point => |p| &.{ p.x, p.y },
             // Placed by others' unknowns (a document's boxes), never a
@@ -265,7 +312,7 @@ pub const Sketch = struct {
             .arc => |ar| &.{ ar.c.x, ar.c.y, ar.a.x, ar.a.y, ar.b.x, ar.b.y },
             .line => |ln| &.{ ln.theta, ln.rho },
             .ray => |ry| &.{ ry.o.x, ry.o.y, ry.angle },
-            .polar_grid => |pg| &.{ pg.c.x, pg.c.y, pg.r[0], pg.r[1], pg.t[0], pg.t[1] },
+            .polar_grid => |pg| return pg.unknowns(buf),
             .tessellation => |t| &.{ t.c.x, t.c.y, t.spacing, t.angle, t.margin },
         };
         @memcpy(buf[0..list.len], list);
@@ -821,6 +868,7 @@ pub const Sketch = struct {
     /// A polar grid's sections as drawn (`polarGridShape`).
     pub fn polarGridSegments(s: *const Sketch, a: Allocator, pg: geometry.PolarGrid, out: *std.ArrayList(geom.Segment)) Allocator.Error!void {
         const v = s.vars.items;
+        if (pg.dial) |d| return dialShape(a, s.val(pg.c), .{ v[pg.r[0]], v[pg.r[1]], v[d.small], v[d.label] }, .{ v[pg.t[0]], v[pg.t[1]] }, pg.largeCount(), d.per, out);
         try polarGridShape(a, s.val(pg.c), .{ v[pg.r[0]], v[pg.r[1]] }, .{ v[pg.t[0]], v[pg.t[1]] }, pg.cols, pg.rings, out);
     }
 

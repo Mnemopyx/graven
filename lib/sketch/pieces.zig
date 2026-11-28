@@ -227,8 +227,10 @@ fn gridCarrier(s: *const Sketch, pg: PolarGrid, part: Part) ?Carrier {
             const i = PolarGrid.index(part.k, pg.cols) orelse return null;
             const t = pg.angle(v, i);
             const d: Point = .{ .x = @cos(t), .y = @sin(t) };
-            const lo = @min(v[pg.r[0]], v[pg.r[1]]);
-            const hi = @max(v[pg.r[0]], v[pg.r[1]]);
+            // A dial's tick runs in to its own inner ring.
+            const r1 = pg.radius(v, pg.innerRing(i));
+            const lo = @min(v[pg.r[0]], r1);
+            const hi = @max(v[pg.r[0]], r1);
             if (!(hi - lo > eps)) return null;
             return .{ .straight = .{ .p = .{ .x = c.x + d.x * lo, .y = c.y + d.y * lo }, .d = d, .t0 = 0, .t1 = hi - lo } };
         },
@@ -255,6 +257,8 @@ pub fn curves(s: *const Sketch, a: Allocator) Allocator.Error![]Curve {
         switch (g.kind) {
             .polar_grid => |pg| {
                 for (0..pg.rings + 1) |j| {
+                    // A dial's labels' ring is where they sit, not a curve.
+                    if (pg.dial != null and j == pg.rings) continue;
                     const c: Curve = .{ .geom = id, .part = .{ .role = .ring, .k = runIndex(j, pg.rings) } };
                     if (curveCarrier(s, c) != null) try out.append(a, c);
                 }
@@ -280,7 +284,19 @@ fn nodesOn(s: *const Sketch, a: Allocator, c: Curve, out: *std.ArrayList(PointRe
     switch (c.part.role) {
         .whole => {},
         .ring => for (0..pg.cols + 1) |i| try out.append(a, .{ .geom = c.geom, .role = .node, .i = runIndex(i, pg.cols), .j = c.part.k }),
-        .border => for (0..pg.rings + 1) |j| try out.append(a, .{ .geom = c.geom, .role = .node, .i = c.part.k, .j = runIndex(j, pg.rings) }),
+        .border => for (0..pg.rings + 1) |j| {
+            // A dial's tick: the rings it reaches (from its outer one in
+            // to its own inner end).
+            if (pg.dial != null) {
+                const v = s.vars.items;
+                const i = PolarGrid.index(c.part.k, pg.cols) orelse return;
+                const r0 = v[pg.r[0]];
+                const r1 = pg.radius(v, pg.innerRing(i));
+                const rj = pg.radius(v, @intCast(j));
+                if (j == pg.rings or rj < @min(r0, r1) - eps or rj > @max(r0, r1) + eps) continue;
+            }
+            try out.append(a, .{ .geom = c.geom, .role = .node, .i = c.part.k, .j = runIndex(j, pg.rings) });
+        },
     }
 }
 
@@ -557,10 +573,15 @@ fn wholeSegments(s: *const Sketch, a: Allocator, cv: Curve, out: *std.ArrayList(
     const v = s.vars.items;
     const ends: [2]PointRef = switch (cv.part.role) {
         .ring => .{ .{ .geom = cv.geom, .role = .node, .i = 0, .j = cv.part.k }, .{ .geom = cv.geom, .role = .node, .i = last, .j = cv.part.k } },
-        else => .{ .{ .geom = cv.geom, .role = .node, .i = cv.part.k, .j = 0 }, .{ .geom = cv.geom, .role = .node, .i = cv.part.k, .j = last } },
+        else => blk: {
+            // A dial's tick ends at its own inner ring.
+            const inner: u32 = if (pg.dial != null) pg.innerRing(PolarGrid.index(cv.part.k, pg.cols) orelse 0) else last;
+            break :blk .{ .{ .geom = cv.geom, .role = .node, .i = cv.part.k, .j = 0 }, .{ .geom = cv.geom, .role = .node, .i = cv.part.k, .j = inner } };
+        },
     };
     // In the carrier's own direction (from its smaller angle or radius).
-    const flip = if (cv.part.role == .ring) pg.sweep(v) < 0 else v[pg.r[1]] < v[pg.r[0]];
+    const inner_r = if (cv.part.role == .border and pg.dial != null) pg.radius(v, pg.innerRing(PolarGrid.index(cv.part.k, pg.cols) orelse 0)) else v[pg.r[1]];
+    const flip = if (cv.part.role == .ring) pg.sweep(v) < 0 else inner_r < v[pg.r[0]];
     const p0 = s.point(if (flip) ends[1] else ends[0]) catch return;
     const p1 = s.point(if (flip) ends[0] else ends[1]) catch return;
     try between(a, k, p0, p1, out);

@@ -125,6 +125,54 @@ pub const PolarGrid = struct {
     t: [2]VarId,
     cols: u32 = 1,
     rings: u32 = 1,
+    /// A dial (`Dial`): this grid's borders are its ticks.
+    dial: ?Dial = null,
+
+    /// A dial, a polar grid's style (the owner, 2026-11-28: dials, the
+    /// clock face first): its borders are ticks, from its outer radius
+    /// `r[0]` in to `r[1]` (a large tick) or to `small` (a small one),
+    /// large ones every `per + 1` borders (`per` small ticks between two
+    /// large: the ratio is a property, as the counts are), so `cols` is
+    /// the large count times `per + 1`. Its four radii are its rings
+    /// (`rings` is 3): 0 the outer, 1 the large ticks' inner ends, 2 the
+    /// small ticks', 3 where its labels sit (`label`), each an unknown,
+    /// in no order.
+    pub const Dial = struct {
+        per: u32 = 0,
+        small: VarId,
+        label: VarId,
+    };
+
+    /// A dial's rings: its radii's unknowns, outer first.
+    pub fn dialRadius(g: PolarGrid, j: u32) VarId {
+        const d = g.dial.?;
+        return switch (j) {
+            0 => g.r[0],
+            1 => g.r[1],
+            2 => d.small,
+            else => d.label,
+        };
+    }
+
+    /// Whether border `i` is a large tick (every border of a grid is).
+    pub fn large(g: PolarGrid, i: u32) bool {
+        const d = g.dial orelse return true;
+        return i % (d.per + 1) == 0;
+    }
+
+    /// A dial's large ticks (its intervals: as many as ticks all the way
+    /// round, one fewer short of it).
+    pub fn largeCount(g: PolarGrid) u32 {
+        const d = g.dial orelse return g.cols;
+        return g.cols / (d.per + 1);
+    }
+
+    /// The ring border `i` runs in to from ring 0 (a grid's: its last;
+    /// a dial's tick: 1 large, 2 small).
+    pub fn innerRing(g: PolarGrid, i: u32) u32 {
+        if (g.dial == null) return g.rings;
+        return if (g.large(i)) 1 else 2;
+    }
 
     /// Index `k` of a run of `n`, `last` read as `n`; null when past it.
     pub fn index(k: u32, n: u32) ?u32 {
@@ -154,6 +202,7 @@ pub const PolarGrid = struct {
     }
 
     pub fn radius(g: PolarGrid, vars: []const f64, j: u32) f64 {
+        if (g.dial != null) return vars[g.dialRadius(j)];
         const f = @as(f64, @floatFromInt(j)) / @as(f64, @floatFromInt(@max(g.rings, 1)));
         return vars[g.r[0]] + (vars[g.r[1]] - vars[g.r[0]]) * f;
     }
@@ -178,8 +227,12 @@ pub const PolarGrid = struct {
     }
 
     /// Its unknowns.
-    pub fn unknowns(g: PolarGrid) [6]VarId {
-        return .{ g.c.x, g.c.y, g.r[0], g.r[1], g.t[0], g.t[1] };
+    pub fn unknowns(g: PolarGrid, buf: *[8]VarId) []VarId {
+        buf[0..6].* = .{ g.c.x, g.c.y, g.r[0], g.r[1], g.t[0], g.t[1] };
+        const d = g.dial orelse return buf[0..6];
+        buf[6] = d.small;
+        buf[7] = d.label;
+        return buf[0..8];
     }
 };
 
@@ -637,10 +690,8 @@ pub const Local = struct {
                 const ii = PolarGrid.index(r.i, pg.cols) orelse return error.NoSuchPoint;
                 const jj = PolarGrid.index(r.j, pg.rings) orelse return error.NoSuchPoint;
                 const fi = @as(f64, @floatFromInt(ii)) / @as(f64, @floatFromInt(@max(pg.cols, 1)));
-                const fj = @as(f64, @floatFromInt(jj)) / @as(f64, @floatFromInt(@max(pg.rings, 1)));
-                const r0 = l.get(pg.r[0]);
                 const t0 = l.get(pg.t[0]);
-                const rad = r0.add(l.get(pg.r[1]).sub(r0).scale(fj));
+                const rad = l.ringRadius(pg, jj);
                 const t = t0.add(l.get(pg.t[1]).sub(t0).scale(fi));
                 const c = l.p(pg.c);
                 return .{ .x = c.x.add(rad.mul(t.cos())), .y = c.y.add(rad.mul(t.sin())) };
@@ -648,6 +699,15 @@ pub const Local = struct {
             else => {},
         };
         return l.p(try l.s.pointOf(r));
+    }
+
+    /// Ring `j`'s radius (in range) of polar grid `pg`, as a dual: a
+    /// dial's own unknown, a grid's between its two.
+    fn ringRadius(l: *Local, pg: PolarGrid, j: u32) D {
+        if (pg.dial != null) return l.get(pg.dialRadius(j));
+        const fj = @as(f64, @floatFromInt(j)) / @as(f64, @floatFromInt(@max(pg.rings, 1)));
+        const r0 = l.get(pg.r[0]);
+        return r0.add(l.get(pg.r[1]).sub(r0).scale(fj));
     }
 
     /// How far point `r` is off curve `part` of macro `g`: a ring's
@@ -662,9 +722,7 @@ pub const Local = struct {
             .whole => return error.WrongKind,
             .ring => {
                 const jj = PolarGrid.index(part.k, pg.rings) orelse return error.NoSuchGeometry;
-                const fj = @as(f64, @floatFromInt(jj)) / @as(f64, @floatFromInt(@max(pg.rings, 1)));
-                const r0 = l.get(pg.r[0]);
-                return q.len().sub(r0.add(l.get(pg.r[1]).sub(r0).scale(fj)));
+                return q.len().sub(l.ringRadius(pg, jj));
             },
             .border => {
                 const ii = PolarGrid.index(part.k, pg.cols) orelse return error.NoSuchGeometry;

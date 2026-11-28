@@ -117,6 +117,7 @@ pub fn analyse(s: *Sketch, gpa: Allocator, out: Allocator) root.Error!Analysis {
     var free: std.ArrayList(GeomId) = .empty;
     for (s.geometry.items, 0..) |g, gi| {
         if (g.reference or g.removed) continue;
+        var ubuf: [8]root.VarId = undefined;
         const any = switch (g.kind) {
             .point => |p| free_var[p.x] or free_var[p.y],
             .affine => false,
@@ -125,7 +126,7 @@ pub fn analyse(s: *Sketch, gpa: Allocator, out: Allocator) root.Error!Analysis {
             .arc => |ar| free_var[ar.c.x] or free_var[ar.c.y] or free_var[ar.a.x] or free_var[ar.a.y] or free_var[ar.b.x] or free_var[ar.b.y],
             .line => |ln| free_var[ln.theta] or free_var[ln.rho],
             .ray => |ry| free_var[ry.o.x] or free_var[ry.o.y] or free_var[ry.angle],
-            .polar_grid => |pg| for (pg.unknowns()) |v| {
+            .polar_grid => |pg| for (pg.unknowns(&ubuf)) |v| {
                 if (free_var[v]) break true;
             } else false,
             .tessellation => |t| for (t.unknowns()) |v| {

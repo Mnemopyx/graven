@@ -2716,6 +2716,10 @@ fn frame() !dvui.App.Result {
         sample_tessellation = false;
         loadTessellationSample();
     }
+    if (sample_dial) {
+        sample_dial = false;
+        loadDialSample();
+    }
     skPruneSelection();
     ghost_pane.fieldsFollowTheme();
     const frame_start: std.Io.Timestamp = .now(dvui.io, .awake);
@@ -2779,6 +2783,8 @@ fn frame() !dvui.App.Result {
                 sample_objects = true;
             } else if (std.mem.eql(u8, which, "tessellation")) {
                 sample_tessellation = true;
+            } else if (std.mem.eql(u8, which, "dial")) {
+                sample_dial = true;
             } else if (std.mem.eql(u8, which, "columns")) loadColumnsSample() catch {} else if (std.mem.eql(u8, which, "columns-free")) loadColumnsSampleWith(false) catch {} else if (std.mem.eql(u8, which, "typography")) loadTypography() catch {};
         }
         // GRAVEN_FIGURE=file.svg: that drawing imported as a figure, made
@@ -8457,6 +8463,7 @@ var status_name_buf: [64]u8 = undefined;
 var sample_sketch_space = false;
 var sample_objects = false;
 var sample_tessellation = false;
+var sample_dial = false;
 var sample_texts = false;
 /// GRAVEN_SAMPLE=connections: the sketch panel sample with a second
 /// connection, its end free, a dot at its end.
@@ -9142,6 +9149,8 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
     // Every track's band, faintly, so empty tracks show where tiles go.
     for (placed.tracks) |t| {
         if (quiet) break;
+        // A dial's labels are its own, not scaffolding to fill.
+        if (t.parent.eql(pi) and t.member < state.model.regionsIn(pi).len and state.model.regionsIn(pi)[t.member].dial != .none) continue;
         // Past the panel's edge: in the warning colour.
         const outside = for (placed.issues) |i| {
             if (i.kind == .region_outside and i.region == t.region) break true;
@@ -9164,6 +9173,7 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
     };
     for (0..state.model.regionsIn(pi).len) |ri| {
         const on = soft_region != null and soft_region.? == ri;
+        if (!on and state.model.regionsIn(pi)[ri].dial != .none) continue;
         if (quiet) {
             contentBand(area, pi, ri, on);
             continue;
@@ -9260,7 +9270,10 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
             .glyph => |g| if (g.face < faceTable().len) dumpGlyph(area, faceTable()[g.face], g, at),
             .path => {},
         };
-        const from_atlas = !show_construction and !exact_text and drawLabelGlyphs(area, l.render, at, ink);
+        // A turned track's glyphs from their outlines, turned.
+        const turned = l.turn != 0;
+        const fr = PxFrame.ofView(area, at).turned(l.turn);
+        const from_atlas = !turned and !show_construction and !exact_text and drawLabelGlyphs(area, l.render, at, ink);
         const pieces = state.flat.getWith(l.render, faceTable(), from_atlas) catch continue;
         for (pieces) |piece| {
             const color: dvui.Color = switch (piece.kind) {
@@ -9270,15 +9283,15 @@ fn drawPanel(area: dvui.Rect.Physical, pi: Parent, placed: *const layout.place.P
             };
             if (show_construction and piece.kind == .ink) {
                 // Outlines over a translucent fill, so the lines show through.
-                fillRegion(area, piece.region, at, .{ .flat = color.opacity(0.18) });
+                fillRegionIn(piece.region, fr, .{ .flat = color.opacity(0.18) });
                 for (piece.region.loops) |loop| {
                     const pts = lifo.alloc(dvui.Point.Physical, loop.len) catch break;
                     defer lifo.free(pts);
-                    for (loop, pts) |q, *out| out.* = state.view.toPx(area, .{ .x = q.x + at.x, .y = q.y + at.y });
+                    for (loop, pts) |q, *out| out.* = fr.px(q);
                     dvui.Path.stroke(.{ .points = pts }, .{ .thickness = px, .color = .{ .color = color }, .closed = true });
                 }
             } else {
-                fillRegion(area, piece.region, at, .{ .flat = color });
+                fillRegionIn(piece.region, fr, .{ .flat = color });
             }
         }
         if (show_construction) drawConstruction(area, l, o);
@@ -9310,6 +9323,17 @@ const PxFrame = struct {
     ox: f64,
     oy: f64,
     s: f64,
+    /// A turn before it is placed (a turned track's label): cos, sin.
+    rc: f64 = 1,
+    rs: f64 = 0,
+
+    /// The same, turned first by `t` radians anticlockwise.
+    fn turned(f: PxFrame, t: f64) PxFrame {
+        var o = f;
+        o.rc = @cos(t);
+        o.rs = @sin(t);
+        return o;
+    }
 
     /// Canvas view `state.view` in `area`, offset to worksheet point `at`.
     fn ofView(area: dvui.Rect.Physical, at: geom.Point) PxFrame {
@@ -9322,7 +9346,9 @@ const PxFrame = struct {
     }
 
     fn px(f: PxFrame, p: geom.Point) dvui.Point.Physical {
-        return .{ .x = @floatCast(f.ox + p.x * f.s), .y = @floatCast(f.oy - p.y * f.s) };
+        const x = f.rc * p.x - f.rs * p.y;
+        const y = f.rs * p.x + f.rc * p.y;
+        return .{ .x = @floatCast(f.ox + x * f.s), .y = @floatCast(f.oy - y * f.s) };
     }
 };
 
@@ -20823,6 +20849,7 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
         .rect_array => "Rectangular array",
         .polar_array => "Polar array",
         .polar_grid => "Polar grid",
+        .dial => "Dial",
         .tessellation => "Tessellation",
         .connection => "Connection",
         .caption => "Caption",
@@ -20830,6 +20857,7 @@ fn objectProperties(it: SkPlace, obj: skl.GroupId) void {
     };
     propText(asElement("object.kind"), "{s}", .{kind_name}, 9700);
     if (g.kind == .tessellation) return tessellationProperties(it, obj);
+    if (g.kind == .dial) return dialProperties(it, obj);
     const Field = struct { id: []const u8, label: []const u8, prop: []const u8, min: f64 };
     const fields = [_]Field{
         .{ .id = "object.sides", .label = comptime elements.get("object.sides").label, .prop = "sides", .min = 3 },
@@ -20896,6 +20924,47 @@ var sk_floor_told: ?[2]f64 = null;
 /// squares turned 15° in a square, whole tiles only, a 2 mm margin, and
 /// triangles in a circle, cut, a 1.5 mm margin. The last is chosen, so
 /// Properties shows it.
+/// GRAVEN_SAMPLE=dial: a new sketch with two dials: a clock face (all the
+/// way round clockwise from the top, 12 hours, 4 minute ticks between,
+/// upright labels 12, 1 … 11 from a sheet's Hours column) and a gauge
+/// (270° clockwise from bottom left, 10 intervals, 1 small tick between,
+/// labels 0 … 100 along its tangent). The gauge is chosen, so Properties
+/// shows it.
+fn loadDialSample() void {
+    newSketchInOwnSpace();
+    followHome();
+    const r = sketch_edit orelse return;
+    const pi = std.math.pi;
+    const Made = struct {
+        fn obj(g: ?u32) ?skl.GroupId {
+            const it = skItem() orelse return null;
+            return skl.composite.objectOf(it.sketch, g orelse return null);
+        }
+    };
+    const clock = Made.obj(skEdit(.{ .dial = .{ .c = .{ .x = -35, .y = 0 }, .radii = dialRadii(30), .t = .{ pi / 2.0, pi / 2.0 - 2 * pi }, .large = 12, .small = 4 } })) orelse return;
+    const gauge = Made.obj(skEdit(.{ .dial = .{ .c = .{ .x = 40, .y = 0 }, .radii = .{ 30, 25, 27.5, 20 }, .t = .{ 1.25 * pi, 1.25 * pi - 1.5 * pi }, .large = 10, .small = 1 } })) orelse return;
+    // A text sheet of the labels, a row each: its default column the
+    // hours, a second the gauge's percentages.
+    var rows: [24][]const u8 = undefined;
+    for (0..12) |k| {
+        rows[2 * k] = std.fmt.allocPrint(dvui.currentWindow().arena(), "Hour {d}", .{k + 1}) catch return;
+        rows[2 * k + 1] = std.fmt.allocPrint(dvui.currentWindow().arena(), "{d}", .{if (k == 0) 12 else k}) catch return;
+    }
+    const langs = [_][]const u8{"Percent"};
+    const sheet = act(.makeRowsSheet, .{ "Dial labels", &langs, &rows }) catch return;
+    for (0..11) |k| {
+        var b: [16]u8 = undefined;
+        // Column 0 is the rows' names: the cells from 1.
+        _ = act(.setSheetCell, .{ sheet, k, 2, std.fmt.bufPrint(&b, "{d}", .{k * 10}) catch "" }) catch {};
+    }
+    const style = labelStyleIn(null) catch return;
+    const pitch = styleLinePitch(style) orelse styleLinePitch(null) orelse 4;
+    _ = act(.setDialLabels, .{ r.sketch, clock, sheet, 0, style, pitch, 3 * pitch }) catch {};
+    _ = act(.setDialLabels, .{ r.sketch, gauge, sheet, 1, style, 0.8 * pitch, 2.4 * pitch }) catch {};
+    _ = act(.setDialOrientation, .{ r.sketch, gauge, false, 0 }) catch {};
+    if (skItem()) |it| skSelectObject(it.sketch, gauge, false, null);
+}
+
 fn loadTessellationSample() void {
     newSketchInOwnSpace();
     followHome();
@@ -20963,6 +21032,90 @@ fn tessellationProperties(it: SkPlace, obj: skl.GroupId) void {
         if (numberProp(f.label, f.value, f.min, f.max, 9722 + k)) |nv| {
             if (nv != f.value) Set.f(obj, f.prop, nv / f.k);
         }
+    }
+}
+
+/// A dial's properties (the owner, 2026-11-28): its large intervals and
+/// small ticks per large (counts, no lower than its bindings need), which
+/// way it runs, and its labels: the sheet column they come from (row k at
+/// large tick k), how they stand (upright, or along its tangent turned
+/// on), and their size.
+fn dialProperties(it: SkPlace, obj: skl.GroupId) void {
+    const m = skl.composite.macroGeometry(it.sketch, obj) orelse return;
+    const pg = switch (it.sketch.geometry.items[m].kind) {
+        .polar_grid => |x| x,
+        else => return,
+    };
+    const dl = pg.dial orelse return;
+    const ar = dvui.currentWindow().arena();
+    const Counts = struct { id: []const u8, label: []const u8, prop: []const u8, value: u32, min: f64 };
+    const counts = [_]Counts{
+        .{ .id = "object.large-ticks", .label = comptime elements.get("object.large-ticks").label, .prop = "large", .value = pg.largeCount(), .min = 1 },
+        .{ .id = "object.small-ticks", .label = comptime elements.get("object.small-ticks").label, .prop = "small", .value = dl.per, .min = 0 },
+    };
+    inline for (counts, 0..) |f, k| {
+        next_element = f.id;
+        const v: f64 = @floatFromInt(f.value);
+        if (numberProp(f.label, v, f.min, 1000, 9740 + k)) |nv| {
+            const n = @round(nv);
+            const floor: f64 = @floatFromInt((if (sketch_edit) |r| state.model.objectCountFloor(ar, r.sketch, obj, f.prop) else skl.composite.countFloor(it.sketch, ar, obj, f.prop, &.{})) catch 0);
+            if (n != v and n < floor) {
+                tell(std.fmt.bufPrint(&sk_floor_buf, "Its bindings need at least {d} there: remove bindings first to go lower. ", .{floor}) catch "Too few for its bindings. ");
+            } else if (n != v and skEdit(.{ .object_prop = .{ .object = obj, .name = f.prop, .value = n } }) != null) {
+                if (k == 0) dial_tool.large = @intFromFloat(n) else dial_tool.small = @intFromFloat(n);
+                refreshProblems();
+                // Its chosen bind points and pieces name indices that have
+                // just moved: the object alone stays chosen.
+                sk_sel.clearRetainingCapacity();
+                if (skItem()) |now| skSelectObject(now.sketch, obj, false, null);
+            }
+        }
+    }
+    var cw = pg.sweep(it.sketch.vars.items) < 0;
+    next_element = "object.clockwise";
+    if (tcheckbox(@src(), &cw, comptime elements.get("object.clockwise").label, .{ .id_extra = 9743 })) _ = skEdit(.{ .object_prop = .{ .object = obj, .name = "clockwise", .value = if (cw) 1 else 0 } });
+    // Its labels: from a sheet's column.
+    const index = if (sketch_edit) |r| r.sketch else return;
+    const d = state.model.dialOf(index, obj);
+    var names: std.ArrayList([]const u8) = .empty;
+    var which: std.ArrayList([2]usize) = .empty;
+    names.append(ar, "None") catch return;
+    which.append(ar, .{ 0, 0 }) catch return;
+    var cur: usize = 0;
+    for (state.model.sheets.items, 0..) |sh, si| for (sh.columns.items, 0..) |col, ci| {
+        const label = std.fmt.allocPrint(ar, "{s}: {s}", .{ sh.name, col }) catch continue;
+        if (d) |x| if (x.sheet == sh.id and x.col == ci) {
+            cur = names.items.len;
+        };
+        names.append(ar, label) catch continue;
+        which.append(ar, .{ si, ci }) catch continue;
+    };
+    next_element = "object.labels-from";
+    if (choiceRow(comptime elements.get("object.labels-from").label, names.items, cur, 9744)) |k| {
+        const key = mergeKey(.{ "dial labels", index, obj, k });
+        const style = if (d) |x| x.style else labelStyleIn(key) catch return;
+        const pitch = if (d) |x| x.pitch else styleLinePitch(style) orelse styleLinePitch(null) orelse 4;
+        const sheet: layout.model.ObjectId = if (k == 0) .none else state.model.sheets.items[which.items[k][0]].id;
+        _ = actM(key, .setDialLabels, .{ index, obj, sheet, which.items[k][1], style, pitch, if (d) |x| x.length else 3 * pitch }) catch {
+            tell("The dial's labels could not be set. ");
+        };
+    }
+    const now = state.model.dialOf(index, obj) orelse return;
+    if (now.sheet == .none) return;
+    const stands = [_][]const u8{ "Upright", "Along its tangent" };
+    next_element = "object.labels";
+    if (choiceRow(comptime elements.get("object.labels").label, &stands, if (now.upright) 0 else 1, 9745)) |k| {
+        _ = act(.setDialOrientation, .{ index, obj, k == 0, now.offset }) catch {};
+    }
+    if (!now.upright) {
+        next_element = "object.label-turn";
+        if (numberProp(comptime elements.get("object.label-turn").label, now.offset, -360, 360, 9746)) |v| {
+            if (v != now.offset) _ = actM(mergeKey(.{ "dial turn", index, obj }), .setDialOrientation, .{ index, obj, false, v }) catch {};
+        }
+    }
+    next_element = "object.label-size";
+    if (numberProp(comptime elements.get("object.label-size").label, now.pitch, 0.5, 200, 9747)) |v| {
+        if (v != now.pitch) _ = actM(mergeKey(.{ "dial size", index, obj }), .setDialLabels, .{ index, obj, now.sheet, now.col, now.style, v, 3 * v }) catch {};
     }
 }
 
@@ -30428,13 +30581,13 @@ fn viewPlace(space: usize, view: usize) ?SkPlace {
     return p;
 }
 
-const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_grid, rect_array, polygon, tessellate };
+const SkTool = enum { none, point, segment, polyline, arc_centre, arc_3pt, circle, circle_3pt, line, ray, polar_grid, rect_array, polygon, tessellate, dial };
 
 /// The geometry buttons, in order, and each one's sub-options (its tools),
 /// the first its default. A button remembers the sub-option last used.
-const SkGeo = enum { point, line, polyline, arc, circle, polygon, array, tessellate };
-const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_grid, .rect_array }, &.{.tessellate} };
-var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_grid, .tessellate };
+const SkGeo = enum { point, line, polyline, arc, circle, polygon, array, tessellate, dial };
+const sk_geo_tools = [_][]const SkTool{ &.{.point}, &.{ .segment, .ray, .line }, &.{.polyline}, &.{ .arc_centre, .arc_3pt }, &.{ .circle, .circle_3pt }, &.{.polygon}, &.{ .polar_grid, .rect_array }, &.{.tessellate}, &.{.dial} };
+var sk_geo_last = [_]SkTool{ .point, .segment, .polyline, .arc_centre, .circle, .polygon, .polar_grid, .tessellate, .dial };
 /// The tessellate tool's tile (its sides) and whether it keeps whole
 /// tiles only, for the next tessellation.
 var tess_sides: u32 = 6;
@@ -31583,7 +31736,30 @@ const sk_points_max = 1024;
 /// the last of each run as `last` (it stays the last as counts change).
 fn skPointsOf(g: skl.Geometry, buf: *[sk_points_max]skl.PointRef, id: skl.GeomId) []skl.PointRef {
     switch (g.kind) {
-        .polar_grid => |pg| {
+        // A dial's: each large tick's two ends and label place, each
+        // small tick's inner end (the last tick as `last`).
+        .polar_grid => |pg| if (pg.dial != null) {
+            buf[0] = .{ .geom = id, .role = .centre };
+            var n: usize = 1;
+            for (0..pg.cols + 1) |i| {
+                if (n + 3 > buf.len) break;
+                const ii: u32 = if (i == pg.cols) skl.geometry.last else @intCast(i);
+                const k: u32 = @intCast(i);
+                // A small tick's inner end only: its outer ends crowd the
+                // rim (they are still bind points, on its ring's pieces).
+                if (pg.large(k)) {
+                    buf[n] = .{ .geom = id, .role = .node, .i = ii, .j = 0 };
+                    n += 1;
+                }
+                buf[n] = .{ .geom = id, .role = .node, .i = ii, .j = pg.innerRing(k) };
+                n += 1;
+                if (pg.large(k)) {
+                    buf[n] = .{ .geom = id, .role = .node, .i = ii, .j = skl.geometry.last };
+                    n += 1;
+                }
+            }
+            return buf[0..n];
+        } else {
             buf[0] = .{ .geom = id, .role = .centre };
             var n: usize = 1;
             for (0..pg.rings + 1) |j| for (0..pg.cols + 1) |i| {
@@ -31839,7 +32015,7 @@ fn skToolClicks(t: SkTool) usize {
         .none => 0,
         .point => 1,
         .segment, .polyline, .circle, .line, .ray, .rect_array, .polygon => 2,
-        .arc_centre, .arc_3pt, .circle_3pt, .polar_grid => 3,
+        .arc_centre, .arc_3pt, .circle_3pt, .polar_grid, .dial => 3,
         .tessellate => 1,
     };
 }
@@ -31904,6 +32080,21 @@ fn skToolClick(p: geom.Point, given: SkClickGiven) void {
             roles = .{ .{ .point = .centre }, .{ .node = .{ 0, 0 } }, .{ .node = .{ skl.geometry.last, skl.geometry.last } } };
         } else {
             tell("A polar grid needs a radius and an angle between its two sides. ");
+        },
+        // A dial, placed in stages as a polar grid is (the owner,
+        // 2026-11-28): its centre, held; its first angle and rim radius,
+        // held; turned either way, its last angle. Its ticks' lengths and
+        // labels' radius in proportion, its counts a clock's; all changed
+        // after (dragged, constrained, in Properties).
+        .dial => if (skDialStaged(c[0], c[1], c[2])) |d| {
+            made = skEdit(.{ .dial = .{ .c = d.c, .radii = d.radii, .t = d.t, .large = dial_tool.large, .small = dial_tool.small } });
+            roles = .{ .{ .point = .centre }, .{ .node = .{ 0, 0 } }, .none };
+            if (made) |g| if (skItem()) |it| if (skl.composite.objectOf(it.sketch, g)) |o| {
+                skSelectObject(it.sketch, o, false, null);
+            };
+            tell("Dial made: its counts, direction and labels are in Properties. ");
+        } else {
+            tell("A dial needs a radius and an angle between its ends. ");
         },
         .rect_array => if (@abs(c[0].x - c[1].x) > 1e-9 and @abs(c[0].y - c[1].y) > 1e-9) {
             _ = skEdit(.{ .array = .{ .polar = false, .at = c[0], .to = c[1], .cols = array_tool.cols, .rows = array_tool.rows } });
@@ -31976,7 +32167,7 @@ fn skGridZero() f64 {
 
 /// Follows the pointer at `p` for the polar grid's sweep (its third step).
 fn skGridFollow(p: geom.Point) void {
-    if (sk_tool != .polar_grid or sk_nclicks != 2) return;
+    if ((sk_tool != .polar_grid and sk_tool != .dial) or sk_nclicks != 2) return;
     const c = sk_clicks[0];
     const first = sk_clicks[1];
     if (sk_grid.from == null or skDist(sk_grid.from.?, first) > 1e-12) {
@@ -32013,6 +32204,31 @@ fn skPolarGridStaged(c: geom.Point, a: geom.Point, b: geom.Point) ?struct { c: g
     if (@abs(sweep) > 2 * std.math.pi - std.math.degreesToRadians(4)) sweep = std.math.copysign(@as(f64, 2 * std.math.pi), sweep);
     if (@abs(sweep) < 1e-6 or @abs(ra - rb) < 1e-9) return null;
     return .{ .c = c, .r = .{ ra, rb }, .t = .{ t0, t0 + sweep } };
+}
+
+/// The dial tool's counts for the next dial: a clock's, then the last
+/// set in a dial's Properties.
+var dial_tool: struct { large: u32 = 12, small: u32 = 4 } = .{};
+
+/// A dial's radii from its rim's: its large ticks a tenth in, its small
+/// ones half that, its labels a quarter in.
+fn dialRadii(r: f64) [4]f64 {
+    return .{ r, 0.9 * r, 0.95 * r, 0.75 * r };
+}
+
+/// The dial the three clicks (or two and the pointer) give: centre `c`,
+/// first angle and rim radius at `a`, last angle as the pointer went round
+/// to `b` (a full turn within a few degrees of one). Null with no radius
+/// or no sweep.
+fn skDialStaged(c: geom.Point, a: geom.Point, b: geom.Point) ?struct { c: geom.Point, radii: [4]f64, t: [2]f64 } {
+    skGridFollow(b);
+    const r = skDist(a, c);
+    if (r <= skGridZero()) return null;
+    const t0 = sk_grid.t0 orelse return null;
+    var sweep = sk_grid.sweep;
+    if (@abs(sweep) > 2 * std.math.pi - std.math.degreesToRadians(4)) sweep = std.math.copysign(@as(f64, 2 * std.math.pi), sweep);
+    if (@abs(sweep) < 1e-6) return null;
+    return .{ .c = c, .radii = dialRadii(r), .t = .{ t0, t0 + sweep } };
 }
 
 /// A drawing tool click's part of the geometry it made.
@@ -33835,6 +34051,29 @@ fn drawSketchMode(area: dvui.Rect.Physical) void {
                 for (segs.items) |sg| skPreview(area, it, &.{sg});
                 dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } });
             } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } }),
+            // A dial: after its centre, its rim's circle and first angle;
+            // after that, the whole dial as it would be placed, its labels'
+            // places dotted.
+            .dial => if (sk_nclicks == 1) {
+                const c0 = sk_clicks[0];
+                const r = skDist(c0, p);
+                var buf4: [4]geom.Segment = undefined;
+                if (r > 1e-9) skPreviewFaint(area, it, geom.arc(c0, r, 0, 2 * std.math.pi, &buf4));
+                dvui.Path.stroke(.{ .points = &.{ skPx(area, it, c0), skPx(area, it, p) } }, .{ .thickness = 1.5 * px, .color = .{ .color = colors.select } });
+            } else if (skDialStaged(sk_clicks[0], sk_clicks[1], p)) |d| {
+                const ar = dvui.currentWindow().arena();
+                var segs: std.ArrayList(geom.Segment) = .empty;
+                skl.dialShape(ar, d.c, d.radii, d.t, dial_tool.large, dial_tool.small, &segs) catch {};
+                for (segs.items) |sg| skPreview(area, it, &.{sg});
+                const sweep = d.t[1] - d.t[0];
+                const full = @abs(@abs(sweep) - 2 * std.math.pi) < 1e-9;
+                const n = if (full) dial_tool.large else dial_tool.large + 1;
+                for (0..n) |k| {
+                    const t = d.t[0] + sweep * @as(f64, @floatFromInt(k)) / @as(f64, @floatFromInt(dial_tool.large));
+                    skDot(skPx(area, it, .{ .x = d.c.x + d.radii[3] * @cos(t), .y = d.c.y + d.radii[3] * @sin(t) }), 2.5 * px, colors.select);
+                }
+                dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } });
+            } else dvui.Path.stroke(.{ .points = &.{ skPx(area, it, sk_clicks[0]), skPx(area, it, p) } }, .{ .thickness = 1 * px, .color = .{ .color = colors.select.opacity(0.5) } }),
             .polygon => if (skDist(sk_clicks[0], p) > 1e-9) {
                 const c0 = sk_clicks[0];
                 const r = skDist(c0, p);
@@ -34033,7 +34272,7 @@ fn sketchPalette() void {
         defer geo.deinit();
         _ = skPaletteKey(@src(), "sketch.palette.select", dvui.entypo.mouse_pointer, 0, 0, sk_tool == .none);
         _ = skPaletteKey(@src(), "sketch.palette.construction", icons.graven(.construction_line) orelse dvui.entypo.flow_line, 0, 1, sk_construction);
-        const names = [_][]const u8{ "sketch.palette.point", "sketch.palette.line", "sketch.palette.polyline", "sketch.palette.arc", "sketch.palette.circle", "sketch.palette.polygon", "sketch.palette.array", "sketch.palette.tessellate" };
+        const names = [_][]const u8{ "sketch.palette.point", "sketch.palette.line", "sketch.palette.polyline", "sketch.palette.arc", "sketch.palette.circle", "sketch.palette.polygon", "sketch.palette.array", "sketch.palette.tessellate", "sketch.palette.dial" };
         const tvgs = [_][]const u8{
             icons.graven(.geo_point) orelse dvui.entypo.dot_single,
             icons.graven(.geo_segment) orelse dvui.entypo.flow_line,
@@ -34043,6 +34282,7 @@ fn sketchPalette() void {
             dvui.entypo.triangle_up,
             dvui.entypo.grid,
             dvui.entypo.network,
+            dvui.entypo.gauge,
         };
         inline for (names, 0..) |name, gi| {
             const on = if (skGeoOf(sk_tool)) |x| @intFromEnum(x) == gi else false;
@@ -34285,6 +34525,11 @@ fn skToolOverlay(g: SkGeo, key: dvui.Rect.Physical) void {
     if (g == .tessellate) {
         skTessOptions();
         dvui.labelNoFmt(@src(), "Click inside a closed path to fill it", .{}, .{ .color_text = .{ .color = faint } });
+        return;
+    }
+    if (sk_tool == .dial) {
+        const steps = [_][]const u8{ "click its centre", "click its rim where it starts", "turn either way, click where it ends (round to the start: all the way)" };
+        dvui.label(@src(), "Dial, step {d} of 3: {s}", .{ sk_nclicks + 1, steps[@min(sk_nclicks, 2)] }, .{ .color_text = .{ .color = faint } });
         return;
     }
     if (sk_tool == .polar_grid) {

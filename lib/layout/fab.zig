@@ -241,7 +241,7 @@ fn source(a: Allocator, m: *const model.Model, panel: usize, placed: *const plac
                 const glyphs = try l.render.outlines(a, faces);
                 for (glyphs) |g| {
                     if (g.contours.len == 0) continue;
-                    try out.append(a, try g.transformed(a, .translate(l.origin.x, l.origin.y)));
+                    try out.append(a, try g.transformed(a, l.frame()));
                 }
             }
             // Paragraph rules are the text's ink too (not a tile track's).
